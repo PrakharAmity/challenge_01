@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -e
+cd "$(dirname "$0")"
+mkdir -p build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j2
+PORT="${PORT:-8080}" ./build/server & PID=$!
+trap 'kill -TERM "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; exit 0' SIGTERM SIGINT EXIT
+snapshot(){ find src include -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' \) -exec stat -c '%Y %n' {} + 2>/dev/null | sort; }
+LAST="$(snapshot)"
+while true; do sleep 2; CURRENT="$(snapshot)"; if [ "$CURRENT" != "$LAST" ]; then echo '[Engine] Rebuilding CricPulse...'; if cmake --build build -j2; then kill -TERM "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; PORT="${PORT:-8080}" ./build/server & PID=$!; echo '[Engine] Server restarted.'; fi; LAST="$CURRENT"; fi; done
