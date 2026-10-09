@@ -1,34 +1,260 @@
+#include "httplib.h"
 #include "cric.hpp"
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include <nlohmann/json.hpp>
+
+#include <chrono>
 #include <cstdlib>
-#include <ctime>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <sstream>
+#include <string>
+
+using json = nlohmann::json;
 
 namespace {
-struct User{std::string id,role,name;};
-std::map<std::string,User> sessions;
-std::string readFile(const std::string&p){std::ifstream f(p.c_str(),std::ios::binary);if(!f)return std::string();std::ostringstream o;o<<f.rdbuf();return o.str();}
-std::map<std::string,std::string> fields(const std::string&body){std::map<std::string,std::string>m;std::istringstream in(body);std::string part;while(std::getline(in,part,'&')){size_t p=part.find('=');if(p!=std::string::npos)m[part.substr(0,p)]=part.substr(p+1);}return m;}
-std::string header(const std::string&r,const std::string&k){size_t p=r.find(k+":");if(p==std::string::npos)return std::string();p+=k.size()+1;while(p<r.size()&&r[p]==' ')++p;size_t e=r.find("\r\n",p);return r.substr(p,e-p);}
-std::string tokenFor(const std::string&req){std::string h=header(req,"Authorization"),prefix="Bearer ";return h.find(prefix)==0?h.substr(prefix.size()):std::string();}
-std::string response(const std::string&body,const std::string&type="application/json",int code=200){std::string label=code==200?"OK":code==401?"Unauthorized":code==403?"Forbidden":code==429?"Too Many Requests":"Not Found";return "HTTP/1.1 "+std::to_string(code)+" "+label+"\r\nContent-Type: "+type+"; charset=utf-8\r\nContent-Length: "+std::to_string(body.size())+"\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n"+body;}
-std::string normalizePath(std::string p){size_t q=p.find('?');if(q!=std::string::npos)p.resize(q);size_t mark=p.find("/preview/");if(mark!=std::string::npos)p=p.substr(mark+9);if(p.empty()||p=="/")return "index.html";while(!p.empty()&&p[0]=='/')p.erase(p.begin());if(p.find("..")!=std::string::npos)return std::string();return p;}
+
+struct Session {
+    std::string userId;
+    std::string role;
+    std::string name;
+};
+
+std::mutex g_stateMutex;
+std::map<std::string, Session> g_sessions;
+std::string g_playerNote = "Play straight early; accelerate after the powerplay.";
+
+long long currentTimestampMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
 }
-int main(){int port=8080;if(const char*p=std::getenv("PORT"))port=std::atoi(p);int server=socket(AF_INET,SOCK_STREAM,0);if(server<0)return 1;int yes=1;setsockopt(server,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));sockaddr_in addr;addr.sin_family=AF_INET;addr.sin_addr.s_addr=htonl(INADDR_ANY);addr.sin_port=htons(static_cast<unsigned short>(port));if(bind(server,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))<0||listen(server,32)<0){std::cerr<<"Could not bind 0.0.0.0:"<<port<<"\n";return 1;}std::cerr<<"CricPulse listening on 0.0.0.0:"<<port<<"\n";cricpulse::MatchState match=cricpulse::sampleMatch();std::string playerNote="Play straight early; accelerate after the powerplay.";
- while(true){int client=accept(server,0,0);if(client<0)continue;std::string req;char buf[4096];ssize_t n;while((n=recv(client,buf,sizeof(buf),0))>0){req.append(buf,static_cast<size_t>(n));size_t h=req.find("\r\n\r\n");if(h!=std::string::npos){std::string len=header(req,"Content-Length");size_t need=len.empty()?0:static_cast<size_t>(std::stoul(len));if(req.size()>=h+4+need)break;}}
-  std::istringstream line(req);std::string method,target,version;line>>method>>target>>version;size_t sep=req.find("\r\n\r\n");std::string body=sep==std::string::npos?std::string():req.substr(sep+4);std::string out;std::string token=tokenFor(req);std::map<std::string,User>::iterator user=sessions.find(token);
-  if(target.find("/api/state")!=std::string::npos)out=response(cricpulse::matchJson(match));
-  else if(target.find("/api/analytics")!=std::string::npos){auto chain=cricpulse::strongestPartnershipChain(match,0,5);std::ostringstream j;j<<"{\"bestSixOverRuns\":"<<cricpulse::bestSixOverRuns(match)<<",\"rollingRunRate\":"<<cricpulse::rollingRunRate(match)<<",\"chainStrength\":"<<cricpulse::chainStrength(match,chain)<<",\"chain\":[";for(size_t i=0;i<chain.size();++i){if(i)j<<',';j<<chain[i];}j<<"]}";out=response(j.str());}
-  else if(method=="POST"&&target.find("/api/login")!=std::string::npos){std::map<std::string,std::string>f=fields(body);User u;bool valid=false;if(f["user"]=="rohit"&&f["password"]=="coverdrive"){u={"player-rohit","player","Rohit Sharma"};valid=true;}else if(f["user"]=="fan"&&f["password"]=="fanpass"){u={"fan-101","fan","Aarav Mehta"};valid=true;}if(valid){std::string newToken="cp-"+u.id+"-"+std::to_string(std::time(0));sessions[newToken]=u;std::ostringstream j;j<<"{\"ok\":true,\"token\":\""<<newToken<<"\",\"user\":\""<<u.name<<"\",\"role\":\""<<u.role<<"\"}";out=response(j.str());}else out=response("{\"ok\":false,\"error\":\"Invalid sign-in\"}","application/json",401);}
-  else if(method=="POST"&&target.find("/api/poll")!=std::string::npos){if(user==sessions.end())out=response("{\"ok\":false,\"error\":\"Sign in required\"}","application/json",401);else if(!cricpulse::allowFanPoll(user->second.id,static_cast<long long>(std::time(0))*1000))out=response("{\"ok\":false,\"error\":\"Poll limit reached\"}","application/json",429);else out=response("{\"ok\":true,\"message\":\"Vote counted\"}");}
-  else if(method=="POST"&&target.find("/api/player-note")!=std::string::npos){if(user==sessions.end())out=response("{\"ok\":false,\"error\":\"Sign in required\"}","application/json",401);else{std::map<std::string,std::string>f=fields(body);bool ok=cricpulse::savePlayerNote(playerNote,f["note"],user->second.role);out=response(ok?"{\"ok\":true}":"{\"ok\":false,\"error\":\"Player access required\"}","application/json",ok?200:403);}}
-  else{std::string file=normalizePath(target);if(file.empty())out=response("not found","text/plain",404);else{std::string data=readFile("web/"+file);if(data.empty())out=response("not found","text/plain",404);else{std::string type=file.size()>=4&&file.substr(file.size()-4)==".css"?"text/css":file.size()>=3&&file.substr(file.size()-3)==".js"?"application/javascript":"text/html";out=response(data,type);}}}
-  send(client,out.data(),out.size(),0);shutdown(client,SHUT_RDWR);close(client);
- }
+
+std::string extractToken(const httplib::Request& req) {
+    auto auth = req.get_header_value("Authorization");
+    std::string prefix = "Bearer ";
+    if (auth.rfind(prefix, 0) == 0) {
+        return auth.substr(prefix.length());
+    }
+    return "";
+}
+
+bool getSession(const httplib::Request& req, Session& outSession) {
+    std::string token = extractToken(req);
+    if (token.empty()) return false;
+    std::lock_guard<std::mutex> lock(g_stateMutex);
+    auto it = g_sessions.find(token);
+    if (it != g_sessions.end()) {
+        outSession = it->second;
+        return true;
+    }
+    return false;
+}
+
+void parseRequestParams(const httplib::Request& req, std::string& user, std::string& pass, std::string& note, std::string& choice) {
+    if (req.has_param("user")) user = req.get_param_value("user");
+    if (req.has_param("password")) pass = req.get_param_value("password");
+    if (req.has_param("note")) note = req.get_param_value("note");
+    if (req.has_param("choice")) choice = req.get_param_value("choice");
+
+    if (!req.body.empty() && req.body.front() == '{') {
+        try {
+            auto bodyJson = json::parse(req.body);
+            if (bodyJson.contains("user") && bodyJson["user"].is_string()) user = bodyJson["user"];
+            if (bodyJson.contains("password") && bodyJson["password"].is_string()) pass = bodyJson["password"];
+            if (bodyJson.contains("note") && bodyJson["note"].is_string()) note = bodyJson["note"];
+            if (bodyJson.contains("choice") && bodyJson["choice"].is_string()) choice = bodyJson["choice"];
+        } catch (...) {
+            // Not valid JSON, ignore
+        }
+    }
+}
+
+void serveStaticFile(const std::string& filePath, const std::string& defaultType, httplib::Response& res) {
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file) {
+        res.status = 404;
+        res.set_content("File not found", "text/plain");
+        return;
+    }
+    std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    res.set_content(content, defaultType);
+}
+
+} // namespace
+
+int main(int argc, char* argv[]) {
+    int port = 5000;
+    if (const char* envPort = std::getenv("PORT")) {
+        port = std::atoi(envPort);
+    } else if (argc > 1) {
+        port = std::atoi(argv[1]);
+    }
+
+    httplib::Server svr;
+
+    cricpulse::MatchState match = cricpulse::sampleMatch();
+
+    svr.set_default_headers({
+        {"Access-Control-Allow-Origin", "*"},
+        {"Access-Control-Allow-Methods", "GET, POST, OPTIONS"},
+        {"Access-Control-Allow-Headers", "Content-Type, Authorization"}
+    });
+
+    svr.Options(".*", [](const httplib::Request&, httplib::Response& res) {
+        res.status = 204;
+    });
+
+    // 1. GET /api/state
+    svr.Get("/api/state", [&](const httplib::Request&, httplib::Response& res) {
+        res.set_content(cricpulse::matchJson(match), "application/json");
+    });
+
+    // 2. GET /api/analytics
+    svr.Get("/api/analytics", [&](const httplib::Request&, httplib::Response& res) {
+        auto chain = cricpulse::strongestPartnershipChain(match, 0, 5);
+        int strength = cricpulse::chainStrength(match, chain);
+        int bestSix = cricpulse::bestSixOverRuns(match);
+        double rollingRate = cricpulse::rollingRunRate(match);
+
+        json j;
+        j["bestSixOverRuns"] = bestSix;
+        j["rollingRunRate"] = rollingRate;
+        j["chainStrength"] = strength;
+        j["chain"] = chain;
+
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // 3. GET /api/reachable/:id
+    svr.Get(R"(/api/reachable/(\d+))", [&](const httplib::Request& req, httplib::Response& res) {
+        int playerId = std::stoi(req.matches[1]);
+        auto reachable = cricpulse::partnershipReachable(match, playerId);
+
+        json j;
+        j["player_id"] = playerId;
+        j["reachable"] = reachable;
+
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // 4. POST /api/login
+    svr.Post("/api/login", [&](const httplib::Request& req, httplib::Response& res) {
+        std::string user, pass, note, choice;
+        parseRequestParams(req, user, pass, note, choice);
+
+        Session session;
+        bool valid = false;
+
+        if (user == "rohit" && pass == "coverdrive") {
+            session = {"player-rohit", "player", "Rohit Sharma"};
+            valid = true;
+        } else if (user == "fan" && pass == "fanpass") {
+            session = {"fan-101", "fan", "Aarav Mehta"};
+            valid = true;
+        } else if (user == "fan2" && pass == "fanpass") {
+            session = {"fan-102", "fan", "Riya Sen"};
+            valid = true;
+        }
+
+        if (valid) {
+            std::string token = "cp-" + session.userId + "-" + std::to_string(currentTimestampMs());
+            {
+                std::lock_guard<std::mutex> lock(g_stateMutex);
+                g_sessions[token] = session;
+            }
+            json j;
+            j["ok"] = true;
+            j["token"] = token;
+            j["user"] = session.name;
+            j["role"] = session.role;
+            res.set_content(j.dump(), "application/json");
+        } else {
+            res.status = 401;
+            res.set_content(R"({"ok":false,"error":"Invalid sign-in"})", "application/json");
+        }
+    });
+
+    // 5. POST /api/poll
+    svr.Post("/api/poll", [&](const httplib::Request& req, httplib::Response& res) {
+        Session session;
+        if (!getSession(req, session)) {
+            res.status = 401;
+            res.set_content(R"({"ok":false,"error":"Sign in required"})", "application/json");
+            return;
+        }
+
+        long long nowMs = currentTimestampMs();
+        if (!cricpulse::allowFanPoll(session.userId, nowMs)) {
+            res.status = 429;
+            res.set_content(R"({"ok":false,"error":"Poll limit reached"})", "application/json");
+            return;
+        }
+
+        res.set_content(R"({"ok":true,"message":"Vote counted"})", "application/json");
+    });
+
+    // 6. GET /api/player-note
+    svr.Get("/api/player-note", [&](const httplib::Request&, httplib::Response& res) {
+        std::lock_guard<std::mutex> lock(g_stateMutex);
+        json j;
+        j["ok"] = true;
+        j["note"] = g_playerNote;
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // 7. POST /api/player-note
+    svr.Post("/api/player-note", [&](const httplib::Request& req, httplib::Response& res) {
+        Session session;
+        if (!getSession(req, session)) {
+            res.status = 401;
+            res.set_content(R"({"ok":false,"error":"Sign in required"})", "application/json");
+            return;
+        }
+
+        std::string user, pass, note, choice;
+        parseRequestParams(req, user, pass, note, choice);
+
+        bool saved = false;
+        {
+            std::lock_guard<std::mutex> lock(g_stateMutex);
+            saved = cricpulse::savePlayerNote(g_playerNote, note, session.role);
+        }
+
+        if (saved) {
+            json j;
+            j["ok"] = true;
+            j["note"] = g_playerNote;
+            res.set_content(j.dump(), "application/json");
+        } else {
+            res.status = 403;
+            res.set_content(R"({"ok":false,"error":"Player access required"})", "application/json");
+        }
+    });
+
+    // Static assets
+    svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
+        serveStaticFile("web/index.html", "text/html; charset=utf-8", res);
+    });
+
+    svr.Get(R"(/([^?]+))", [](const httplib::Request& req, httplib::Response& res) {
+        std::string path = req.matches[1];
+        if (path.empty() || path == "/") path = "index.html";
+        std::string filePath = "web/" + path;
+
+        std::string ctype = "text/plain";
+        if (filePath.rfind(".html") != std::string::npos) ctype = "text/html; charset=utf-8";
+        else if (filePath.rfind(".css") != std::string::npos) ctype = "text/css; charset=utf-8";
+        else if (filePath.rfind(".js") != std::string::npos) ctype = "application/javascript; charset=utf-8";
+        else if (filePath.rfind(".json") != std::string::npos) ctype = "application/json; charset=utf-8";
+        else if (filePath.rfind(".svg") != std::string::npos) ctype = "image/svg+xml";
+
+        serveStaticFile(filePath, ctype, res);
+    });
+
+    std::cout << "CricPulse listening on 0.0.0.0:" << port << std::endl;
+    svr.listen("0.0.0.0", port);
+
+    return 0;
 }

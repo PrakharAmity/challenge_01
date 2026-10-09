@@ -1,89 +1,120 @@
-# CricPulse — Live Cricket Analytics
+# CricPulse — Live Cricket Analytics (C++17 Edition)
 
 ## Description
 
-CricPulse is a C++ live cricket analytics hub with a ball-by-ball feed, innings momentum panels, partnership network graph, player focus-note access, and fan polls. It runs as a lightweight HTTP service with a browser interface and an in-memory match fixture catalog. The analytics engine models live match statistics including over-by-over runs, partnership connections between batting pairs, rolling run rates, and role-based access control for players and fans.
+CricPulse is a C++17 live cricket analytics hub with a ball-by-ball feed, innings momentum panels, partnership network graph, player focus-note access, and fan polls. It runs as a lightweight HTTP service on port 5000 (`0.0.0.0:5000`) with an interactive browser interface and an in-memory match fixture catalog. The analytics engine models live match statistics including over-by-over runs, partnership connections between batting pairs, rolling run rates, and role-based access control for players and fans.
 
 ## Repository Structure
 
 ```text
 cricpulse-cpp-challenge/
-├── CMakeLists.txt          Build configuration for core library, server, and tests
-├── challenge.json          Isolated runtime, port, build, start, and test configuration
-├── start.sh                Build, launch, and live-rebuild watcher entrypoint
+├── CMakeLists.txt              Build configuration for core library, server, and tests (C++17)
+├── challenge.json              Runtime environment, port 5000, build, start, and test command
+├── README.md                   Project overview and developer documentation
+├── AI.md                       Detailed challenge and bug documentation
 ├── include/
-│   └── cric.hpp            Match state structures, data models, and analytics API declarations
+│   ├── match_data.hpp          Match state structures and sample match declarations
+│   ├── best_six_over.hpp       Best six-over continuous stretch declaration
+│   ├── rolling_rate.hpp        Rolling run rate declaration
+│   ├── strongest_chain.hpp     Strongest partnership chain declaration
+│   ├── partnership_reachability.hpp Recursive graph traversal declaration
+│   ├── player_access.hpp       Role-based note permission declarations
+│   ├── poll_limiter.hpp        Sliding-window fan poll limiter declaration
+│   ├── httplib.h               Single-header cpp-httplib HTTP server
+│   └── nlohmann/
+│       └── json.hpp            Single-header nlohmann JSON library
 ├── src/
-│   ├── best_six_over.cpp           Best six-over continuous stretch calculation
-│   ├── cric.cpp                    Deterministic sample match fixture and JSON serialization
-│   ├── main.cpp                    HTTP server, session management, REST routes, and static assets
-│   ├── partnership_reachability.cpp Recursive graph traversal for connected batting partnerships
-│   ├── player_access.cpp           Role-based permission check and player focus-note editing
-│   ├── poll_limiter.cpp            Sliding-window rate-limiting for fan poll votes
-│   ├── rolling_rate.cpp            Rolling run rate calculation across recent overs
-│   └── strongest_chain.cpp         Maximum-bottleneck partnership chain search and chain strength
+│   ├── main.cpp                HTTP server, REST endpoints, auth, and static file serving
+│   ├── cric.cpp                Deterministic sample match fixture and JSON serialization
+│   ├── best_six_over.cpp       Best six-over stretch implementation (Bug 2)
+│   ├── rolling_rate.cpp        Rolling run rate implementation (Bug 3)
+│   ├── strongest_chain.cpp     Partnership chain search implementation (Bug 4)
+│   ├── partnership_reachability.cpp Recursive graph traversal implementation (Bug 1)
+│   ├── player_access.cpp       Role access validation implementation (Bug 5)
+│   └── poll_limiter.cpp        Fan poll rate limiting implementation (Bug 6)
 ├── web/
-│   ├── app.js               Live query handling, API calls, graph rendering, and UI updates
-│   ├── index.html           CricPulse match center page structure and user-facing copy
-│   └── style.css            Responsive sports analytics visual design
-├── tests/
-│   ├── run_tests.sh        Incremental test rebuild and JSON test runner script
-│   └── challenge_tests.cpp Six behavioral challenge tests
-└── README.md               Candidate-facing application overview and execution guide
+│   ├── index.html              CricPulse live match center layout and cards
+│   ├── style.css               Dark-theme sports analytics CSS with responsive styling
+│   └── app.js                  Interactive dashboard client, REST API sync, and SVG graph
+└── tests/
+    ├── run_tests.cpp           Automated runner with strict single-line JSON telemetry
+    └── run_tests.sh            Incremental test build and test runner execution script
 ```
+
+---
 
 ## Bugs and Bug Locations
 
-These are the six behavioral bug surfaces covered by the challenge. The named locations identify the owning implementation areas for debugging and review.
+These are the six behavioral bug surfaces covered by the challenge. All six bugs are intentionally present initially and can be observed both through the test suite and live in the browser dashboard.
 
-### 1. Recursive partnership scan misses branching connected players
+### 1. Partnership Reachability Misses Branching Connected Players
+- **Bug Location:** `src/partnership_reachability.cpp`, helper `visit`
+- **Test Name:** `test_recursive_partnership_scan_visits_all_connected_players`
+- **How to Observe:**
+  - *CLI/Test:* Run `./tests/run_tests.sh`. Test fails with `"Partnership scan missed a player on a second branch"`.
+  - *Frontend:* Click Rohit Sharma's node in the partnership network graph on `http://localhost:5000`. A warning banner is displayed: `"Warning: Only 1 teammate is connected to Rohit Sharma"`.
+- **Failure:** The helper function `visit` executes `return visit(state, link.player, seen, order);` inside the partner iteration loop on the first unvisited neighbor, immediately terminating sibling branch exploration and only finding 1 teammate instead of all connected teammates.
+- **Expected:** The function should continue exploring all sibling links in the loop:
+  ```cpp
+  seen[link.player] = true;
+  order.push_back(link.player);
+  visit(state, link.player, seen, order);
+  ```
 
-- **Bug location:** `src/partnership_reachability.cpp`, `cricpulse::partnershipReachable` (and helper `visit`)
-- **How to observe it:** Perform a partnership reachability traversal from a batsman whose partnerships branch across multiple batting partners (e.g., player 0 connects to players 1 and 2, and player 2 connects to player 3).
-- **Failure:** The helper function `visit` executes an early `return` inside the partner iteration loop on the first unvisited link, terminating the scan before other branches or sibling links are traversed.
-- **Expected:** The partnership scan traverses all branches recursively and discovers all connected players in the partnership network.
+### 2. Best Six-Over Stretch Calculation Skips Overlapping Windows
+- **Bug Location:** `src/best_six_over.cpp`, `cricpulse::bestSixOverRuns`
+- **Test Name:** `test_best_six_over_stretch_includes_overlapping_windows`
+- **How to Observe:**
+  - *CLI/Test:* Run `./tests/run_tests.sh`. Test fails with `"Expected best six-over stretch of 108 runs, got 86"`.
+  - *Frontend:* Inspect the `"BEST 6 OVERS"` badge on the Innings Momentum card. It displays `86 RUNS` instead of `108 RUNS`.
+- **Failure:** The sliding window loop increments by `start += 6` instead of `start += 1`, only evaluating discrete 6-over blocks (overs 1–6 = 86 runs, overs 7–12 = 75 runs) and missing overlapping windows like overs 3–8 (108 runs).
+- **Expected:** The loop slides by one over at a time (`start++` or `start += 1`) across all available overs to evaluate all overlapping windows and find the maximum stretch (108 runs).
 
-### 2. Best six-over stretch calculation skips overlapping sliding windows
+### 3. Rolling Run Rate Computes Innings Average Instead of Recent Form
+- **Bug Location:** `src/rolling_rate.cpp`, `cricpulse::rollingRunRate`
+- **Test Name:** `test_rolling_run_rate_uses_recent_overs`
+- **How to Observe:**
+  - *CLI/Test:* Run `./tests/run_tests.sh`. Test fails with `"Expected recent three-over rate near 11.33, got 13.416667"`.
+  - *Frontend:* Inspect the Live Form card. The rolling run rate displays `13.42 / over` instead of `11.33 / over`.
+- **Failure:** The function sums all runs across the entire innings and divides by total overs count (`inningsRuns / state.overs.size()`), calculating the overall innings average run rate rather than the recent 3-over rate.
+- **Expected:** The function computes the run rate specifically over the last 3 completed overs (`(5 + 5 + 24) / 3 = 11.333333`).
 
-- **Bug location:** `src/best_six_over.cpp`, `cricpulse::bestSixOverRuns`
-- **How to observe it:** Inspect the "BEST 6 OVERS" badge on the innings momentum card or query `/api/analytics` for a match where peak scoring spans across non-multiple-of-6 intervals (e.g., overs 3 to 8).
-- **Failure:** The loop increments the start index by 6 (`start += 6`) instead of 1, evaluating only disjoint blocks of overs and missing the true highest-scoring overlapping 6-over phase.
-- **Expected:** The function slides a 6-over window by one over at a time (`start++`) across the entire innings to find the continuous 6-over window with the maximum total runs (108 runs in the sample match).
+### 4. Strongest Partnership Chain Chooses Fewest Hops Instead of Maximizing Bottleneck
+- **Bug Location:** `src/strongest_chain.cpp`, `cricpulse::strongestPartnershipChain`
+- **Test Name:** `test_partnership_chain_maximizes_minimum_link`
+- **How to Observe:**
+  - *CLI/Test:* Run `./tests/run_tests.sh`. Test fails with `"Expected strongest chain bottleneck of 30 runs, got 20"`.
+  - *Frontend:* The Strongest Chain badge displays `Rohit ➔ Kohli ➔ Jadeja (20 runs bottleneck)` instead of 30 runs.
+- **Failure:** The function uses standard unweighted Breadth-First Search (BFS) using `std::queue`. BFS finds the path with the fewest hops (`0 ➔ 1 ➔ 5`, bottleneck 20 runs) instead of the path maximizing minimum link capacity (`0 ➔ 2 ➔ 4 ➔ 5`, bottleneck 30 runs).
+- **Expected:** The function finds the maximum-bottleneck path (e.g., using a max-bottleneck priority queue / modified Dijkstra or capacity path search) that maximizes the weakest link in the chain (bottleneck 30 runs).
 
-### 3. Rolling run rate computes entire innings average instead of recent overs
+### 5. Fan Accounts Permitted to Edit Player Focus Notes
+- **Bug Location:** `src/player_access.cpp`, `cricpulse::canSavePlayerNote`; surfaced by `POST /api/player-note`
+- **Test Name:** `test_fan_cannot_edit_player_focus_note`
+- **How to Observe:**
+  - *CLI/Test:* Run `./tests/run_tests.sh`. Test fails with `"Fan role must not edit a player-only focus note"`.
+  - *Frontend:* Sign in as Fan 1 (`fan` / `fanpass`). In the Player Workspace card, click `"Save note"`. The note is successfully saved (HTTP 200).
+- **Failure:** `canSavePlayerNote` returns `role == "player" || role == "fan"`, erroneously allowing unprivileged fan users to update private player tactical notes.
+- **Expected:** The function must restrict permissions strictly to `role == "player"`. Fan accounts must be rejected with HTTP 403 Forbidden.
 
-- **Bug location:** `src/rolling_rate.cpp`, `cricpulse::rollingRunRate`
-- **How to observe it:** Check the "Rolling run rate" display on the live form card or query `/api/analytics`.
-- **Failure:** The function divides total innings runs across all overs by total overs count (`inningsRuns / state.overs.size()`), yielding the cumulative match run rate (~13.42) rather than the recent 3-over rolling rate.
-- **Expected:** The rolling run rate is calculated over the most recent 3 completed overs (e.g., overs 10, 11, and 12 yielding 34 runs over 3 overs ≈ 11.33 runs/over).
+### 6. Fan Poll Rate Limiting is Shared Globally Rather Than Per User
+- **Bug Location:** `src/poll_limiter.cpp`, `cricpulse::allowFanPoll`; surfaced by `POST /api/poll`
+- **Test Name:** `test_poll_rate_limit_is_per_fan`
+- **How to Observe:**
+  - *CLI/Test:* Run `./tests/run_tests.sh`. Test fails with `"A second fan should have an independent poll allowance"`.
+  - *Frontend:* Sign in as Fan 1 (`fan` / `fanpass`) and cast 3 votes in the Fan Zone poll until reaching the limit. Sign out and sign in as Fan 2 (`fan2` / `fanpass`). Casting a vote as Fan 2 is immediately blocked with HTTP 429 `"Poll limit reached"`.
+- **Failure:** The function ignores `userId` via `(void)userId;` and uses a single static window counter for all incoming requests, causing any fan to exhaust the quota for everyone.
+- **Expected:** Rate limiting must be maintained independently per fan (`userId`), allowing each fan account to have their own allowance within the time window.
 
-### 4. Strongest partnership chain minimizes hop count instead of maximizing bottleneck link strength
+---
 
-- **Bug location:** `src/strongest_chain.cpp`, `cricpulse::strongestPartnershipChain`
-- **How to observe it:** Inspect the partnership chain path and bottleneck strength between player 0 (Rohit Sharma) and player 5 (Ravindra Jadeja) via `/api/analytics` or the player connection graph.
-- **Failure:** The function uses standard unweighted breadth-first search (BFS), which selects the shortest path by hop count (`0 -> 1 -> 5`, bottleneck 20 runs) rather than the path with the strongest minimum partnership link (`0 -> 2 -> 4 -> 5`, bottleneck 30 runs).
-- **Expected:** The path search uses a maximum-bottleneck path algorithm (e.g., modified Dijkstra or max-min priority queue) to find the partnership path between two players that maximizes the weakest link in the chain (bottleneck strength of 30 runs).
+## Strict JSON Test Telemetry Output
 
-### 5. Fan role is permitted to edit player focus notes
+The test executable outputs ONLY a single-line strict JSON string to stdout:
 
-- **Bug location:** `src/player_access.cpp`, `cricpulse::canSavePlayerNote`; surfaced by `src/main.cpp`, `POST /api/player-note`
-- **How to observe it:** Sign in as a fan user (`fan` / `fanpass`) and attempt to submit an update to the player focus note.
-- **Failure:** `canSavePlayerNote` allows `role == "fan"` alongside `role == "player"`, allowing unprivileged fans to modify private player tactical notes.
-- **Expected:** Only authenticated users with the `player` role can save player focus notes; requests with the `fan` role are rejected with an access error (HTTP 403 Forbidden).
+```json
+{"test_recursive_partnership_scan_visits_all_connected_players":{"Status":"failed","Execution time":"0ms","Error":"Partnership scan missed a player on a second branch"},"test_best_six_over_stretch_includes_overlapping_windows":{"Status":"failed","Execution time":"0ms","Error":"Expected best six-over stretch of 108 runs, got 86"},"test_rolling_run_rate_uses_recent_overs":{"Status":"failed","Execution time":"0ms","Error":"Expected recent three-over rate near 11.33, got 13.416667"},"test_partnership_chain_maximizes_minimum_link":{"Status":"failed","Execution time":"0ms","Error":"Expected strongest chain bottleneck of 30 runs, got 20"},"test_fan_cannot_edit_player_focus_note":{"Status":"failed","Execution time":"0ms","Error":"Fan role must not edit a player-only focus note"},"test_poll_rate_limit_is_per_fan":{"Status":"failed","Execution time":"0ms","Error":"A second fan should have an independent poll allowance"},"Passed":0,"Failed":6,"Total bugs":6,"Total Execution time":"0ms"}
+```
 
-### 6. Fan poll rate limiting is shared globally rather than tracked per user
-
-- **Bug location:** `src/poll_limiter.cpp`, `cricpulse::allowFanPoll`; surfaced by `src/main.cpp`, `POST /api/poll`
-- **How to observe it:** Have one fan submit poll votes until the rate limit is reached, then have a second distinct fan submit a vote.
-- **Failure:** The rate limiter ignores `userId` via `(void)userId;` and uses a single static window counter for all requests, exhausting the poll quota globally and rejecting votes from other users.
-- **Expected:** Rate limiting is enforced independently per fan (`userId`), ensuring each user has their own poll allowance within the time window.
-
-## Expected Behaviour After Fixing All Bugs
-
-- The recursive partnership scan visits all connected players across all branches in the graph.
-- The best six-over calculation evaluates all overlapping six-over windows and identifies the maximum run stretch (108 runs).
-- The rolling run rate correctly reflects scoring momentum across the most recent 3 overs (~11.33 runs/over).
-- The strongest partnership chain selects the path maximizing the bottleneck partnership link (strength of 30 runs).
-- Fan users cannot edit player focus notes, restricting updates exclusively to player accounts.
-- Fan poll voting rate limits are tracked per individual user rather than globally across all fans.
-- All behavioral tests in `tests/challenge_tests.cpp` pass with exit code 0.
+- When any test fails, the process exits with status code 1.
+- When all 6 tests pass, the process exits with status code 0.

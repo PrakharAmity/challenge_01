@@ -1,17 +1,80 @@
-#include "cric.hpp"
+#include "match_data.hpp"
+#include <nlohmann/json.hpp>
 #include <sstream>
 
+using json = nlohmann::json;
+
 namespace cricpulse {
-MatchState sampleMatch(){
- MatchState s;s.overs={{1,7},{2,7},{3,18},{4,18},{5,18},{6,18},{7,18},{8,18},{9,5},{10,5},{11,5},{12,24}};s.score=161;s.wickets=3;s.target=211;s.currentOver=12;
- s.players={{0,"Rohit Sharma","Opener"},{1,"Virat Kohli","Batter"},{2,"Shubman Gill","Batter"},{3,"Suryakumar Yadav","Batter"},{4,"Hardik Pandya","All-rounder"},{5,"Ravindra Jadeja","All-rounder"}};
- auto pair=[&](int a,int b,int runs){s.graph[a].push_back({b,runs});s.graph[b].push_back({a,runs});};
- pair(0,1,38);pair(0,2,30);pair(0,3,14);pair(1,5,20);pair(2,4,45);pair(3,4,22);pair(4,5,34);return s;
+
+MatchState sampleMatch() {
+    MatchState s;
+    s.score = 161;
+    s.wickets = 3;
+    s.target = 211;
+    s.currentOver = 12;
+
+    const std::vector<int> overRuns = {7, 7, 18, 18, 18, 18, 18, 18, 5, 5, 5, 24};
+    for (size_t i = 0; i < overRuns.size(); ++i) {
+        s.overs.push_back({static_cast<int>(i + 1), overRuns[i]});
+    }
+
+    s.players = {
+        {0, "Rohit Sharma", "Opener"},
+        {1, "Virat Kohli", "Batter"},
+        {2, "Shubman Gill", "Batter"},
+        {3, "Suryakumar Yadav", "Batter"},
+        {4, "Hardik Pandya", "All-rounder"},
+        {5, "Ravindra Jadeja", "All-rounder"}
+    };
+
+    auto addPair = [&](int u, int v, int runs) {
+        s.graph[u].push_back({v, runs});
+        s.graph[v].push_back({u, runs});
+    };
+
+    addPair(0, 1, 38);
+    addPair(0, 2, 30);
+    addPair(0, 3, 14);
+    addPair(1, 5, 20);
+    addPair(2, 4, 45);
+    addPair(3, 4, 22);
+    addPair(4, 5, 34);
+
+    return s;
 }
-std::string matchJson(const MatchState& s){
- std::ostringstream o;o<<"{\"score\":"<<s.score<<",\"wickets\":"<<s.wickets<<",\"target\":"<<s.target<<",\"currentOver\":"<<s.currentOver<<",\"overs\":[";
- for(size_t i=0;i<s.overs.size();++i){if(i)o<<',';o<<"{\"number\":"<<s.overs[i].number<<",\"runs\":"<<s.overs[i].runs<<"}";}
- o<<"],\"players\":[";for(size_t i=0;i<s.players.size();++i){if(i)o<<',';const auto&p=s.players[i];o<<"{\"id\":"<<p.id<<",\"name\":\""<<p.name<<"\",\"role\":\""<<p.role<<"\"}";}
- o<<"],\"partnerships\":[";bool first=true;for(const auto&entry:s.graph)for(const auto&e:entry.second){if(!first)o<<',';first=false;o<<"{\"from\":"<<entry.first<<",\"to\":"<<e.player<<",\"runs\":"<<e.runs<<"}";}o<<"]}";return o.str();
+
+std::string matchJson(const MatchState& s) {
+    json j;
+    j["score"] = s.score;
+    j["wickets"] = s.wickets;
+    j["target"] = s.target;
+    j["currentOver"] = s.currentOver;
+
+    json oversArr = json::array();
+    for (const auto& o : s.overs) {
+        oversArr.push_back({{"number", o.number}, {"runs", o.runs}});
+    }
+    j["overs"] = oversArr;
+
+    json playersArr = json::array();
+    for (const auto& p : s.players) {
+        playersArr.push_back({{"id", p.id}, {"name", p.name}, {"role", p.role}});
+    }
+    j["players"] = playersArr;
+
+    json partnershipsArr = json::array();
+    for (const auto& pair : s.graph) {
+        for (const auto& link : pair.second) {
+            partnershipsArr.push_back({
+                {"from", pair.first},
+                {"to", link.player},
+                {"runs", link.runs}
+            });
+        }
+    }
+    j["partnerships"] = partnershipsArr;
+
+    return j.dump();
 }
-}
+
+} // namespace cricpulse
