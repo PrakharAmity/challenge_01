@@ -2,14 +2,14 @@
 
 ## Description
 
-CricPulse is a C++17 live cricket analytics hub with a ball-by-ball feed, innings momentum panels, partnership network graph, player focus-note access, and fan polls. It runs as a lightweight HTTP service on port 5000 (`0.0.0.0:5000`) with an interactive browser interface and an in-memory match fixture catalog. The analytics engine models live match statistics including over-by-over runs, partnership connections between batting pairs, rolling run rates, and role-based access control for players and fans.
+CricPulse is a C++17 live cricket analytics hub with a ball-by-ball feed, innings momentum panels, partnership network graph, player focus-note access, and fan polls. It runs as a lightweight HTTP service on port 3000 (`0.0.0.0:3000`) with an interactive browser interface and an in-memory match fixture catalog. The analytics engine models live match statistics including over-by-over runs, partnership connections between batting pairs, rolling run rates, and role-based access control for players and fans.
 
 ## Repository Structure
 
 ```text
 cricpulse-cpp-challenge/
 ├── CMakeLists.txt              Build configuration for core library, server, and tests (C++17)
-├── challenge.json              Runtime environment, port 5000, build, start, and test command
+├── challenge.json              Runtime environment, port 3000, build, start, and test command
 ├── README.md                   Project overview and developer documentation
 ├── AI.md                       Detailed challenge and bug documentation
 ├── include/
@@ -52,7 +52,7 @@ These are the six behavioral bug surfaces covered by the challenge. All six bugs
 - **Test Name:** `test_recursive_partnership_scan_visits_all_connected_players`
 - **How to Observe:**
   - *CLI/Test:* Run `./tests/run_tests.sh`. Test fails with `"Partnership scan missed a player on a second branch"`.
-  - *Frontend:* Click Rohit Sharma's node in the partnership network graph on `http://localhost:5000`. A warning banner is displayed: `"Warning: Only 1 teammate is connected to Rohit Sharma"`.
+  - *Frontend:* Click Rohit Sharma's node in the partnership network graph on `http://localhost:3000`. A warning banner is displayed: `"Warning: Only 1 teammate is connected to Rohit Sharma"`.
 - **Failure:** The helper function `visit` executes `return visit(state, link.player, seen, order);` inside the partner iteration loop on the first unvisited neighbor, immediately terminating sibling branch exploration and only finding 1 teammate instead of all connected teammates.
 - **Expected:** The function should continue exploring all sibling links in the loop:
   ```cpp

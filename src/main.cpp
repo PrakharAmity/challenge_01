@@ -85,7 +85,7 @@ void serveStaticFile(const std::string& filePath, const std::string& defaultType
 } // namespace
 
 int main(int argc, char* argv[]) {
-    int port = 5000;
+    int port = 3000;
     if (const char* envPort = std::getenv("PORT")) {
         port = std::atoi(envPort);
     } else if (argc > 1) {
