@@ -17,12 +17,8 @@ CricPulse is an interactive cricket analytics hub and match center dashboard bui
 ### Technology Stack
 - **Language / Standard**: C++17
 - **HTTP & JSON Libraries**: Single-header `httplib.h` (`cpp-httplib`) and `nlohmann/json.hpp`
-- **Build System**: CMake (C++17) — `cmake -B build -S . && cmake --build build`
 - **Frontend**: Vanilla JavaScript (ES6+), HTML5, Vanilla CSS (CSS custom properties, glassmorphism, responsive layout, dark sports theme, SVG network graph)
-- **Testing**: Automated C++ runner (`tests/run_tests.cpp`, `./tests/run_tests.sh`) emitting single-line strict JSON telemetry
-- **Data & State**: In-memory deterministic match state model (no external database dependencies)
 
----
 
 ## 2. Debugging Challenge
 
