@@ -5,6 +5,7 @@ let match = null;
 let analytics = null;
 let session = JSON.parse(localStorage.getItem('cricpulse-session') || 'null');
 let currentVoteCount = 0;
+let selectedScanPlayerId = 0;
 
 const playerMap = {
   0: { id: 0, x: 120, y: 225, initials: 'RS', short: 'Rohit', fullName: 'Rohit Sharma', role: 'Opener', cl: 'kohli' },
@@ -39,6 +40,7 @@ async function loadData() {
       $('#player-note').value = noteRes.note;
     }
     renderUI();
+    checkReachability(selectedScanPlayerId, true);
   } catch (err) {
     console.warn('API sync attempt failed:', err);
   }
@@ -180,12 +182,13 @@ function renderGraph() {
   $$('.graph-player').forEach(node => {
     node.onclick = () => {
       const pid = parseInt(node.getAttribute('data-player-id'), 10);
-      checkReachability(pid);
+      selectedScanPlayerId = pid;
+      checkReachability(pid, false);
     };
   });
 }
 
-async function checkReachability(playerId) {
+async function checkReachability(playerId, silent = false) {
   try {
     const p = playerMap[playerId] || { short: `Player ${playerId}`, fullName: `Player ${playerId}` };
     const res = await fetch(`/api/reachable/${playerId}`);
@@ -201,15 +204,15 @@ async function checkReachability(playerId) {
       banner.className = 'reachability-banner warning';
       if (reachable.length === 1) {
         textEl.innerHTML = `⚠️ <b>Partnership Scan Warning:</b> Only 1 teammate is connected to ${p.fullName} (Scan terminated prematurely on sibling branch)!`;
-        toast(`Warning: Only 1 teammate is connected to ${p.short}`, true);
+        if (!silent) toast(`Warning: Only 1 teammate is connected to ${p.short}`, true);
       } else {
         textEl.innerHTML = `⚠️ <b>Partnership Scan Incomplete:</b> Only ${reachable.length} teammate(s) connected to ${p.fullName} (Expected ${totalExpected} connected players)!`;
-        toast(`Scan incomplete: only ${reachable.length} teammate(s) reachable`, true);
+        if (!silent) toast(`Scan incomplete: only ${reachable.length} teammate(s) reachable`, true);
       }
     } else {
       banner.className = 'reachability-banner success';
       textEl.innerHTML = `✅ <b>Partnership Scan Complete:</b> All ${reachable.length} teammates connected to ${p.fullName} across all network branches!`;
-      toast(`All ${reachable.length} teammates connected to ${p.short}`);
+      if (!silent) toast(`All ${reachable.length} teammates connected to ${p.short}`);
     }
 
     // Temporarily highlight reachable player nodes
