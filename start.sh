@@ -22,7 +22,7 @@ while true; do
         if cmake --build build -j2; then
             kill -TERM "$PID" 2>/dev/null || true
             wait "$PID" 2>/dev/null || true
-            PORT="${PORT:-5000}" "$SERVER_BIN" & PID=$!
+            PORT="${PORT:-3000}" "$SERVER_BIN" & PID=$!
             echo '[Engine] Server restarted.'
         fi
         LAST="$CURRENT"
