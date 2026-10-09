@@ -5,6 +5,6 @@
     "install_command": "cmake -B build -S . && cmake --build build",
     "start_command": "./build/cricpulse_server",
     "test_command": "./tests/run_tests.sh",
-    "ports": [{ "container_port": 5000, "type": "preview" }]
+    "ports": [{ "container_port": 3000, "type": "preview" }]
   }
 }
