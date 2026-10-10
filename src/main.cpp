@@ -1,13 +1,22 @@
-#include "httplib.h"
-#include "cric.hpp"
+#include "analytics.hpp"
+#include "auth.hpp"
+#include "match_data.hpp"
+#include "partnership_chain.hpp"
+#include "partnership_routes.hpp"
+#include "rate_limiter.hpp"
+#include "run_rate.hpp"
+
+#include <httplib.h>
 #include <nlohmann/json.hpp>
 
 #include <chrono>
-#include <cstdlib>
+#include <csignal>
+#include <ctime>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
-#include <map>
 #include <mutex>
+#include <random>
 #include <sstream>
 #include <string>
 
@@ -15,245 +24,509 @@ using json = nlohmann::json;
 
 namespace {
 
-struct Session {
-    std::string userId;
-    std::string role;
-    std::string name;
-};
+std::string g_bootId;
+std::string g_startedAt;
+const std::string g_authSecret = "cricpulse-auth-token-secret-2026";
 
-std::mutex g_stateMutex;
-std::map<std::string, Session> g_sessions;
-std::string g_playerNote = "Play straight early; accelerate after the powerplay.";
-
-long long currentTimestampMs() {
+int64_t currentTimeMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()
     ).count();
 }
 
-std::string extractToken(const httplib::Request& req) {
-    auto auth = req.get_header_value("Authorization");
-    std::string prefix = "Bearer ";
-    if (auth.rfind(prefix, 0) == 0) {
-        return auth.substr(prefix.length());
-    }
-    return "";
+std::string formatCurrentTime() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t tt = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &tt);
+#else
+    localtime_r(&tt, &tm);
+#endif
+    std::ostringstream oss;
+    oss << std::setfill('0')
+        << std::setw(2) << tm.tm_hour << ":"
+        << std::setw(2) << tm.tm_min << ":"
+        << std::setw(2) << tm.tm_sec;
+    return oss.str();
 }
 
-bool getSession(const httplib::Request& req, Session& outSession) {
-    std::string token = extractToken(req);
-    if (token.empty()) return false;
-    std::lock_guard<std::mutex> lock(g_stateMutex);
-    auto it = g_sessions.find(token);
-    if (it != g_sessions.end()) {
-        outSession = it->second;
-        return true;
+std::string readFileContent(const std::string& path) {
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs.is_open()) {
+        return "";
     }
-    return false;
+    std::ostringstream oss;
+    oss << ifs.rdbuf();
+    return oss.str();
 }
 
-void parseRequestParams(const httplib::Request& req, std::string& user, std::string& pass, std::string& note, std::string& choice) {
-    if (req.has_param("user")) user = req.get_param_value("user");
-    if (req.has_param("password")) pass = req.get_param_value("password");
-    if (req.has_param("note")) note = req.get_param_value("note");
-    if (req.has_param("choice")) choice = req.get_param_value("choice");
-
-    if (!req.body.empty() && req.body.front() == '{') {
-        try {
-            auto bodyJson = json::parse(req.body);
-            if (bodyJson.contains("user") && bodyJson["user"].is_string()) user = bodyJson["user"];
-            if (bodyJson.contains("password") && bodyJson["password"].is_string()) pass = bodyJson["password"];
-            if (bodyJson.contains("note") && bodyJson["note"].is_string()) note = bodyJson["note"];
-            if (bodyJson.contains("choice") && bodyJson["choice"].is_string()) choice = bodyJson["choice"];
-        } catch (...) {
-            // Not valid JSON, ignore
-        }
-    }
+std::string computeFrontendRevision() {
+    std::string html = readFileContent("web/index.html");
+    std::string css = readFileContent("web/style.css");
+    std::string js = readFileContent("web/app.js");
+    return cricpulse::computeSha256Hex(html + css + js).substr(0, 16);
 }
 
-void serveStaticFile(const std::string& filePath, const std::string& defaultType, httplib::Response& res) {
-    std::ifstream file(filePath, std::ios::binary);
-    if (!file) {
-        res.status = 404;
-        res.set_content("File not found", "text/plain");
-        return;
+void setCommonHeaders(httplib::Response& res, const std::string& contentType) {
+    res.set_header("Content-Type", contentType);
+    res.set_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    res.set_header("Pragma", "no-cache");
+    res.set_header("Expires", "0");
+    res.set_header("Access-Control-Allow-Origin", "*");
+    res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
+httplib::Server* g_serverPtr = nullptr;
+
+void handleSignal(int) {
+    if (g_serverPtr) {
+        g_serverPtr->stop();
     }
-    std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    res.set_content(content, defaultType);
 }
 
 } // namespace
 
 int main(int argc, char* argv[]) {
-    int port = 3000;
-    if (const char* envPort = std::getenv("PORT")) {
-        port = std::atoi(envPort);
-    } else if (argc > 1) {
-        port = std::atoi(argv[1]);
+    // Generate boot id and startup timestamp
+    int64_t startMs = currentTimeMs();
+    std::mt19937_64 rng(static_cast<uint64_t>(startMs));
+    std::uniform_int_distribution<uint64_t> dist;
+    std::ostringstream bootOss;
+    bootOss << "boot-" << std::hex << dist(rng) << "-" << dist(rng);
+    g_bootId = bootOss.str();
+    g_startedAt = formatCurrentTime();
+
+    int port = 8080;
+    const char* envPort = std::getenv("PORT");
+    if (envPort && *envPort) {
+        try {
+            port = std::stoi(envPort);
+        } catch (...) {}
+    }
+    if (argc > 1) {
+        try {
+            port = std::stoi(argv[1]);
+        } catch (...) {}
     }
 
     httplib::Server svr;
+    g_serverPtr = &svr;
 
-    cricpulse::MatchState match = cricpulse::sampleMatch();
+    std::signal(SIGINT, handleSignal);
+    std::signal(SIGTERM, handleSignal);
 
-    svr.set_default_headers({
-        {"Access-Control-Allow-Origin", "*"},
-        {"Access-Control-Allow-Methods", "GET, POST, OPTIONS"},
-        {"Access-Control-Allow-Headers", "Content-Type, Authorization"}
-    });
+    // Initialize application state
+    auto match = cricpulse::getSampleMatchFixture();
+    std::mutex stateMutex;
+    cricpulse::PollRateLimiter pollLimiter(10000); // 10 second cooldown
 
-    svr.Options(".*", [](const httplib::Request&, httplib::Response& res) {
+    // Seed default rate-limiter scenario: initial vote 8s ago, rejected attempt 3s ago
+    pollLimiter.seedVote("fan-seeded-user", startMs - 8000);
+    pollLimiter.recordVoteAttempt("fan-seeded-user", startMs - 3000);
+
+    // Seed default player session: issued 45s ago with 30s TTL (expired 15s ago)
+    cricpulse::PlayerSession seededSession = cricpulse::createPlayerSession(
+        "player-18", "Virat Kohli", "captain", startMs - 45000, 30000, g_authSecret
+    );
+    std::string seededToken = cricpulse::serializeSessionToken(seededSession);
+
+    // CORS preflight
+    svr.Options(R"((?:.*))", [](const httplib::Request&, httplib::Response& res) {
+        setCommonHeaders(res, "text/plain");
         res.status = 204;
     });
 
-    // 1. GET /api/state
-    svr.Get("/api/state", [&](const httplib::Request&, httplib::Response& res) {
-        res.set_content(cricpulse::matchJson(match), "application/json");
-    });
-
-    // 2. GET /api/analytics
-    svr.Get("/api/analytics", [&](const httplib::Request&, httplib::Response& res) {
-        auto chain = cricpulse::strongestPartnershipChain(match, 0, 5);
-        int strength = cricpulse::chainStrength(match, chain);
-        int bestSix = cricpulse::bestSixOverRuns(match);
-        double rollingRate = cricpulse::rollingRunRate(match);
-
+    // Health endpoint
+    svr.Get(R"((?:.*)/api/health)", [](const httplib::Request&, httplib::Response& res) {
         json j;
-        j["bestSixOverRuns"] = bestSix;
-        j["rollingRunRate"] = rollingRate;
-        j["chainStrength"] = strength;
-        j["chain"] = chain;
-
+        j["boot_id"] = g_bootId;
+        j["started_at"] = g_startedAt;
+        j["ui_revision"] = computeFrontendRevision();
+        setCommonHeaders(res, "application/json");
         res.set_content(j.dump(), "application/json");
     });
 
-    // 3. GET /api/reachable/:id
-    svr.Get(R"(/api/reachable/(\d+))", [&](const httplib::Request& req, httplib::Response& res) {
-        int playerId = std::stoi(req.matches[1]);
-        auto reachable = cricpulse::partnershipReachable(match, playerId);
+    // Match overview endpoint
+    svr.Get(R"((?:.*)/api/match)", [&](const httplib::Request& req, httplib::Response& res) {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        int64_t now = currentTimeMs();
 
-        json j;
-        j["player_id"] = playerId;
-        j["reachable"] = reachable;
+        // Compute live analytics using core domain functions
+        double currentRunRate = cricpulse::calculateCurrentRunRate(match.totalRuns, match.legalBalls);
+        auto bestStretch = cricpulse::calculateBestSixOverStretch(match.overRuns);
 
-        res.set_content(j.dump(), "application/json");
-    });
+        // Optimal route between Rohit Sharma (0) and Ravindra Jadeja (4)
+        auto optimalRoute = cricpulse::findOptimalPartnershipRoute(match.partnershipGraph, 0, 4);
 
-    // 4. POST /api/login
-    svr.Post("/api/login", [&](const httplib::Request& req, httplib::Response& res) {
-        std::string user, pass, note, choice;
-        parseRequestParams(req, user, pass, note, choice);
+        // Longest partnership chain starting from Rohit Sharma (0)
+        auto longestChain = cricpulse::findLongestPartnershipChain(match.partnershipGraph, 0);
 
-        Session session;
-        bool valid = false;
-
-        if (user == "rohit" && pass == "coverdrive") {
-            session = {"player-rohit", "player", "Rohit Sharma"};
-            valid = true;
-        } else if (user == "fan" && pass == "fanpass") {
-            session = {"fan-101", "fan", "Aarav Mehta"};
-            valid = true;
-        } else if (user == "fan2" && pass == "fanpass") {
-            session = {"fan-102", "fan", "Riya Sen"};
-            valid = true;
+        // Evaluate session status for seeded or header token
+        std::string tokenToEval = seededToken;
+        std::string authHdr = req.get_header_value("Authorization");
+        if (authHdr.rfind("Bearer ", 0) == 0) {
+            tokenToEval = authHdr.substr(7);
+        } else if (req.has_param("token")) {
+            tokenToEval = req.get_param_value("token");
         }
 
-        if (valid) {
-            std::string token = "cp-" + session.userId + "-" + std::to_string(currentTimestampMs());
-            {
-                std::lock_guard<std::mutex> lock(g_stateMutex);
-                g_sessions[token] = session;
+        auto activeSession = cricpulse::deserializeSessionToken(tokenToEval);
+        bool sessionExpired = cricpulse::isSessionExpired(activeSession, now);
+        bool sessionValid = cricpulse::isSessionValid(activeSession, now, g_authSecret);
+
+        // Fan poll status
+        std::string fanId = req.has_param("fanId") ? req.get_param_value("fanId") : "fan-seeded-user";
+        auto pollStatus = pollLimiter.checkVoteStatus(fanId, now);
+
+        json j;
+        j["matchId"] = match.matchId;
+        j["matchTitle"] = match.matchTitle;
+        j["matchStatus"] = match.matchStatus;
+        j["battingTeam"] = match.battingTeam;
+        j["bowlingTeam"] = match.bowlingTeam;
+        j["totalRuns"] = match.totalRuns;
+        j["wickets"] = match.wickets;
+        j["legalBalls"] = match.legalBalls;
+        j["oversFormatted"] = std::to_string(match.legalBalls / 6) + "." + std::to_string(match.legalBalls % 6);
+        j["currentRunRate"] = currentRunRate;
+
+        // Sliding window stretch result
+        j["bestStretch"] = {
+            {"startOver", bestStretch.startOver},
+            {"endOver", bestStretch.endOver},
+            {"totalRuns", bestStretch.totalRuns}
+        };
+
+        // Over runs breakdown
+        j["overRuns"] = match.overRuns;
+
+        // Ball by ball feed
+        json feedArr = json::array();
+        for (const auto& b : match.ballFeed) {
+            feedArr.push_back({
+                {"over", b.over},
+                {"ball", b.ball},
+                {"batter", b.batter},
+                {"bowler", b.bowler},
+                {"runs", b.runs},
+                {"isWicket", b.isWicket},
+                {"commentary", b.commentary}
+            });
+        }
+        j["ballFeed"] = feedArr;
+
+        // Players list
+        json playersArr = json::array();
+        for (const auto& p : match.players) {
+            playersArr.push_back({
+                {"id", p.id},
+                {"name", p.name},
+                {"role", p.role},
+                {"team", p.team}
+            });
+        }
+        j["players"] = playersArr;
+
+        // Partnership graph
+        json linksArr = json::array();
+        for (size_t u = 0; u < match.partnershipGraph.size(); ++u) {
+            for (const auto& edge : match.partnershipGraph[u]) {
+                if (static_cast<int>(u) < edge.target) {
+                    linksArr.push_back({
+                        {"source", u},
+                        {"target", edge.target},
+                        {"weight", edge.weight}
+                    });
+                }
             }
-            json j;
-            j["ok"] = true;
-            j["token"] = token;
-            j["user"] = session.name;
-            j["role"] = session.role;
-            res.set_content(j.dump(), "application/json");
-        } else {
-            res.status = 401;
-            res.set_content(R"({"ok":false,"error":"Invalid sign-in"})", "application/json");
         }
-    });
+        j["graphLinks"] = linksArr;
 
-    // 5. POST /api/poll
-    svr.Post("/api/poll", [&](const httplib::Request& req, httplib::Response& res) {
-        Session session;
-        if (!getSession(req, session)) {
-            res.status = 401;
-            res.set_content(R"({"ok":false,"error":"Sign in required"})", "application/json");
-            return;
+        // Optimal route
+        j["optimalRoute"] = {
+            {"startPlayer", 0},
+            {"endPlayer", 4},
+            {"playerPath", optimalRoute.playerPath},
+            {"totalCost", optimalRoute.totalCost}
+        };
+
+        // Longest chain
+        j["longestChain"] = {
+            {"startPlayer", 0},
+            {"playerPath", longestChain},
+            {"length", longestChain.size()}
+        };
+
+        // Poll options
+        json pollArr = json::array();
+        for (const auto& opt : match.pollOptions) {
+            pollArr.push_back({
+                {"id", opt.id},
+                {"name", opt.name},
+                {"votes", opt.votes}
+            });
         }
+        j["pollOptions"] = pollArr;
+        j["pollStatus"] = {
+            {"fanId", fanId},
+            {"allowed", pollStatus.allowed},
+            {"remainingCooldownMs", pollStatus.remainingCooldownMs},
+            {"nextAvailableMs", pollStatus.nextAvailableMs}
+        };
 
-        long long nowMs = currentTimestampMs();
-        if (!cricpulse::allowFanPoll(session.userId, nowMs)) {
-            res.status = 429;
-            res.set_content(R"({"ok":false,"error":"Poll limit reached"})", "application/json");
-            return;
-        }
+        // Session status
+        j["auth"] = {
+            {"token", tokenToEval},
+            {"playerId", activeSession.playerId},
+            {"playerName", activeSession.playerName},
+            {"role", activeSession.role},
+            {"issuedAtMs", activeSession.issuedAtMs},
+            {"expiresAtMs", activeSession.expiresAtMs},
+            {"isExpired", sessionExpired},
+            {"isValid", sessionValid}
+        };
 
-        res.set_content(R"({"ok":true,"message":"Vote counted"})", "application/json");
-    });
-
-    // 6. GET /api/player-note
-    svr.Get("/api/player-note", [&](const httplib::Request&, httplib::Response& res) {
-        std::lock_guard<std::mutex> lock(g_stateMutex);
-        json j;
-        j["ok"] = true;
-        j["note"] = g_playerNote;
+        setCommonHeaders(res, "application/json");
         res.set_content(j.dump(), "application/json");
     });
 
-    // 7. POST /api/player-note
-    svr.Post("/api/player-note", [&](const httplib::Request& req, httplib::Response& res) {
-        Session session;
-        if (!getSession(req, session)) {
-            res.status = 401;
-            res.set_content(R"({"ok":false,"error":"Sign in required"})", "application/json");
-            return;
+    // Best six over stretch endpoint
+    svr.Get(R"((?:.*)/api/analytics/best-stretch)", [&](const httplib::Request&, httplib::Response& res) {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        auto result = cricpulse::calculateBestSixOverStretch(match.overRuns);
+        json j = {
+            {"startOver", result.startOver},
+            {"endOver", result.endOver},
+            {"totalRuns", result.totalRuns}
+        };
+        setCommonHeaders(res, "application/json");
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // Current run rate calculation endpoint
+    svr.Get(R"((?:.*)/api/analytics/run-rate)", [&](const httplib::Request& req, httplib::Response& res) {
+        int runs = match.totalRuns;
+        int balls = match.legalBalls;
+        if (req.has_param("runs")) {
+            try { runs = std::stoi(req.get_param_value("runs")); } catch (...) {}
+        }
+        if (req.has_param("balls")) {
+            try { balls = std::stoi(req.get_param_value("balls")); } catch (...) {}
+        }
+        double rate = cricpulse::calculateCurrentRunRate(runs, balls);
+        json j = {
+            {"totalRuns", runs},
+            {"legalBalls", balls},
+            {"runRate", rate}
+        };
+        setCommonHeaders(res, "application/json");
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // Player login endpoint
+    svr.Post(R"((?:.*)/api/auth/login)", [&](const httplib::Request& req, httplib::Response& res) {
+        std::string playerId = "player-18";
+        std::string playerName = "Virat Kohli";
+        std::string role = "captain";
+
+        try {
+            auto body = json::parse(req.body);
+            if (body.contains("playerId")) playerId = body["playerId"];
+            if (body.contains("playerName")) playerName = body["playerName"];
+            if (body.contains("role")) role = body["role"];
+        } catch (...) {}
+
+        int64_t now = currentTimeMs();
+        int64_t durationMs = 30000; // 30 second session TTL
+        auto session = cricpulse::createPlayerSession(playerId, playerName, role, now, durationMs, g_authSecret);
+        std::string token = cricpulse::serializeSessionToken(session);
+
+        json j = {
+            {"token", token},
+            {"playerId", session.playerId},
+            {"playerName", session.playerName},
+            {"role", session.role},
+            {"issuedAtMs", session.issuedAtMs},
+            {"expiresAtMs", session.expiresAtMs},
+            {"isExpired", cricpulse::isSessionExpired(session, now)},
+            {"isValid", cricpulse::isSessionValid(session, now, g_authSecret)}
+        };
+
+        setCommonHeaders(res, "application/json");
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // Session validation endpoint
+    svr.Get(R"((?:.*)/api/auth/status)", [&](const httplib::Request& req, httplib::Response& res) {
+        std::string token = seededToken;
+        std::string authHdr = req.get_header_value("Authorization");
+        if (authHdr.rfind("Bearer ", 0) == 0) {
+            token = authHdr.substr(7);
+        } else if (req.has_param("token")) {
+            token = req.get_param_value("token");
         }
 
-        std::string user, pass, note, choice;
-        parseRequestParams(req, user, pass, note, choice);
+        int64_t now = currentTimeMs();
+        auto session = cricpulse::deserializeSessionToken(token);
+        bool isExpired = cricpulse::isSessionExpired(session, now);
+        bool isValid = cricpulse::isSessionValid(session, now, g_authSecret);
 
-        bool saved = false;
-        {
-            std::lock_guard<std::mutex> lock(g_stateMutex);
-            saved = cricpulse::savePlayerNote(g_playerNote, note, session.role);
-        }
+        json j = {
+            {"token", token},
+            {"playerId", session.playerId},
+            {"playerName", session.playerName},
+            {"role", session.role},
+            {"issuedAtMs", session.issuedAtMs},
+            {"expiresAtMs", session.expiresAtMs},
+            {"isExpired", isExpired},
+            {"isValid", isValid}
+        };
 
-        if (saved) {
-            json j;
-            j["ok"] = true;
-            j["note"] = g_playerNote;
+        setCommonHeaders(res, "application/json");
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // Fan poll voting endpoint
+    svr.Post(R"((?:.*)/api/poll/vote)", [&](const httplib::Request& req, httplib::Response& res) {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        std::string fanId = "fan-live-user";
+        std::string optionId = "opt-1";
+
+        try {
+            auto body = json::parse(req.body);
+            if (body.contains("fanId")) fanId = body["fanId"];
+            if (body.contains("optionId")) optionId = body["optionId"];
+        } catch (...) {}
+
+        int64_t now = currentTimeMs();
+        auto status = pollLimiter.recordVoteAttempt(fanId, now);
+
+        if (status.allowed) {
+            for (auto& opt : match.pollOptions) {
+                if (opt.id == optionId) {
+                    opt.votes++;
+                    break;
+                }
+            }
+            json j = {
+                {"success", true},
+                {"fanId", fanId},
+                {"remainingCooldownMs", status.remainingCooldownMs},
+                {"nextAvailableMs", status.nextAvailableMs}
+            };
+            setCommonHeaders(res, "application/json");
             res.set_content(j.dump(), "application/json");
         } else {
-            res.status = 403;
-            res.set_content(R"({"ok":false,"error":"Player access required"})", "application/json");
+            json j = {
+                {"success", false},
+                {"fanId", fanId},
+                {"remainingCooldownMs", status.remainingCooldownMs},
+                {"nextAvailableMs", status.nextAvailableMs},
+                {"error", "Cooldown period active. Please wait before submitting another vote."}
+            };
+            setCommonHeaders(res, "application/json");
+            res.status = 429;
+            res.set_content(j.dump(), "application/json");
         }
+    });
+
+    // Fan poll status query endpoint
+    svr.Get(R"((?:.*)/api/poll/status)", [&](const httplib::Request& req, httplib::Response& res) {
+        std::string fanId = req.has_param("fanId") ? req.get_param_value("fanId") : "fan-seeded-user";
+        int64_t now = currentTimeMs();
+        auto status = pollLimiter.checkVoteStatus(fanId, now);
+
+        json j = {
+            {"fanId", fanId},
+            {"allowed", status.allowed},
+            {"remainingCooldownMs", status.remainingCooldownMs},
+            {"nextAvailableMs", status.nextAvailableMs}
+        };
+
+        setCommonHeaders(res, "application/json");
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // Partnership route calculation endpoint
+    svr.Get(R"((?:.*)/api/partnership/route)", [&](const httplib::Request& req, httplib::Response& res) {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        int start = 0;
+        int end = 4;
+        if (req.has_param("start")) {
+            try { start = std::stoi(req.get_param_value("start")); } catch (...) {}
+        }
+        if (req.has_param("end")) {
+            try { end = std::stoi(req.get_param_value("end")); } catch (...) {}
+        }
+
+        auto route = cricpulse::findOptimalPartnershipRoute(match.partnershipGraph, start, end);
+        json j = {
+            {"startPlayer", start},
+            {"endPlayer", end},
+            {"playerPath", route.playerPath},
+            {"totalCost", route.totalCost}
+        };
+
+        setCommonHeaders(res, "application/json");
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // Recursive partnership chain calculation endpoint
+    svr.Get(R"((?:.*)/api/partnership/chain)", [&](const httplib::Request& req, httplib::Response& res) {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        int start = 0;
+        if (req.has_param("start")) {
+            try { start = std::stoi(req.get_param_value("start")); } catch (...) {}
+        }
+
+        auto chain = cricpulse::findLongestPartnershipChain(match.partnershipGraph, start);
+        json j = {
+            {"startPlayer", start},
+            {"playerPath", chain},
+            {"length", chain.size()}
+        };
+
+        setCommonHeaders(res, "application/json");
+        res.set_content(j.dump(), "application/json");
     });
 
     // Static assets
-    svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
-        serveStaticFile("web/index.html", "text/html; charset=utf-8", res);
+    svr.Get(R"((?:.*)/style\.css)", [](const httplib::Request&, httplib::Response& res) {
+        std::string content = readFileContent("web/style.css");
+        setCommonHeaders(res, "text/css");
+        res.set_content(content, "text/css");
     });
 
-    svr.Get(R"(/([^?]+))", [](const httplib::Request& req, httplib::Response& res) {
-        std::string path = req.matches[1];
-        if (path.empty() || path == "/") path = "index.html";
-        std::string filePath = "web/" + path;
-
-        std::string ctype = "text/plain";
-        if (filePath.rfind(".html") != std::string::npos) ctype = "text/html; charset=utf-8";
-        else if (filePath.rfind(".css") != std::string::npos) ctype = "text/css; charset=utf-8";
-        else if (filePath.rfind(".js") != std::string::npos) ctype = "application/javascript; charset=utf-8";
-        else if (filePath.rfind(".json") != std::string::npos) ctype = "application/json; charset=utf-8";
-        else if (filePath.rfind(".svg") != std::string::npos) ctype = "image/svg+xml";
-
-        serveStaticFile(filePath, ctype, res);
+    svr.Get(R"((?:.*)/app\.js)", [](const httplib::Request&, httplib::Response& res) {
+        std::string content = readFileContent("web/app.js");
+        setCommonHeaders(res, "application/javascript");
+        res.set_content(content, "application/javascript");
     });
 
-    std::cout << "CricPulse listening on 0.0.0.0:" << port << std::endl;
+    // Default static HTML route
+    svr.Get(R"((?:.*))", [](const httplib::Request& req, httplib::Response& res) {
+        // If request path points to an existing file in web
+        std::string path = req.path;
+        if (path.rfind("/style.css") != std::string::npos) {
+            std::string content = readFileContent("web/style.css");
+            setCommonHeaders(res, "text/css");
+            res.set_content(content, "text/css");
+            return;
+        }
+        if (path.rfind("/app.js") != std::string::npos) {
+            std::string content = readFileContent("web/app.js");
+            setCommonHeaders(res, "application/javascript");
+            res.set_content(content, "application/javascript");
+            return;
+        }
+        std::string content = readFileContent("web/index.html");
+        setCommonHeaders(res, "text/html; charset=utf-8");
+        res.set_content(content, "text/html; charset=utf-8");
+    });
+
+    std::cerr << "[CricPulse] Server listening on 0.0.0.0:" << port << " (boot_id: " << g_bootId << ")" << std::endl;
     svr.listen("0.0.0.0", port);
 
     return 0;

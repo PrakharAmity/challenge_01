@@ -5,25 +5,17 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$DIR"
 
 if [ ! -d "build" ]; then
-    if command -v ninja >/dev/null 2>&1; then
-        cmake -B build -S . -G Ninja >/dev/null 2>&1 || cmake -B build -S . >/dev/null 2>&1
-    else
-        cmake -B build -S . >/dev/null 2>&1
-    fi
+    cmake -B build -S . -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1
 fi
 
-cmake --build build --target test_runner >/dev/null 2>&1 || cmake --build build >/dev/null 2>&1 || true
+cmake --build build --target challenge_tests -j2 >/dev/null 2>&1 || cmake --build build -j2 >/dev/null 2>&1
 
-if [ -f "./build/test_runner" ]; then
-    exec ./build/test_runner
-elif [ -f "./build/test_runner.exe" ]; then
-    exec ./build/test_runner.exe
-elif [ -f "./build/Release/test_runner.exe" ]; then
-    exec ./build/Release/test_runner.exe
-elif [ -f "./build/challenge_tests" ]; then
+if [ -f "./build/challenge_tests" ]; then
     exec ./build/challenge_tests
 elif [ -f "./build/challenge_tests.exe" ]; then
     exec ./build/challenge_tests.exe
+elif [ -f "./build/Release/challenge_tests.exe" ]; then
+    exec ./build/Release/challenge_tests.exe
 else
     echo "Test runner not found" >&2
     exit 1

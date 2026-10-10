@@ -1,38 +1,50 @@
 #pragma once
 
+#include "partnership_routes.hpp"
 #include <string>
 #include <vector>
-#include <unordered_map>
 
 namespace cricpulse {
 
-struct Over {
-    int number;
-    int runs;
+struct BallEvent {
+    int over{0};
+    int ball{0};
+    std::string batter;
+    std::string bowler;
+    int runs{0};
+    bool isWicket{false};
+    std::string commentary;
 };
 
-struct Player {
-    int id;
+struct PlayerInfo {
+    int id{0};
     std::string name;
     std::string role;
+    std::string team;
 };
 
-struct Partnership {
-    int player;
-    int runs;
+struct PollOption {
+    std::string id;
+    std::string name;
+    int votes{0};
 };
 
-struct MatchState {
-    std::vector<Over> overs;
-    std::vector<Player> players;
-    std::unordered_map<int, std::vector<Partnership>> graph;
-    int score;
-    int wickets;
-    int target;
-    int currentOver;
+struct MatchFixture {
+    std::string matchId;
+    std::string matchTitle;
+    std::string matchStatus;
+    std::string battingTeam;
+    std::string bowlingTeam;
+    int totalRuns{155};
+    int wickets{3};
+    int legalBalls{75}; // 12.3 overs
+    std::vector<int> overRuns; // runs scored in each completed over
+    std::vector<BallEvent> ballFeed;
+    std::vector<PlayerInfo> players;
+    std::vector<std::vector<PartnershipEdge>> partnershipGraph;
+    std::vector<PollOption> pollOptions;
 };
 
-MatchState sampleMatch();
-std::string matchJson(const MatchState& state);
+MatchFixture getSampleMatchFixture();
 
 } // namespace cricpulse

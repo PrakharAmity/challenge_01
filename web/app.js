@@ -1,365 +1,762 @@
-const $ = (q) => document.querySelector(q);
-const $$ = (q) => document.querySelectorAll(q);
+// CricPulse Live Analytics Hub Client
+(function () {
+  'use strict';
 
-let match = null;
-let analytics = null;
-let session = JSON.parse(localStorage.getItem('cricpulse-session') || 'null');
-let currentVoteCount = 0;
-let selectedScanPlayerId = 0;
+  // API Base path resolver compatible with relative paths and reverse proxies
+  function getApiBase() {
+    let path = window.location.pathname;
+    if (!path.endsWith('/')) {
+      path = path.substring(0, path.lastIndexOf('/') + 1);
+    }
+    return path;
+  }
 
-const playerMap = {
-  0: { id: 0, x: 120, y: 225, initials: 'RS', short: 'Rohit', fullName: 'Rohit Sharma', role: 'Opener', cl: 'kohli' },
-  1: { id: 1, x: 360, y: 110, initials: 'VK', short: 'Kohli', fullName: 'Virat Kohli', role: 'Batter', cl: 'kohli' },
-  2: { id: 2, x: 360, y: 340, initials: 'SG', short: 'Gill', fullName: 'Shubman Gill', role: 'Batter', cl: 'other' },
-  3: { id: 3, x: 620, y: 90, initials: 'SY', short: 'Surya', fullName: 'Suryakumar Yadav', role: 'Batter', cl: 'pandya' },
-  4: { id: 4, x: 640, y: 330, initials: 'HP', short: 'Hardik', fullName: 'Hardik Pandya', role: 'All-rounder', cl: 'pandya' },
-  5: { id: 5, x: 880, y: 225, initials: 'RJ', short: 'Jadeja', fullName: 'Ravindra Jadeja', role: 'All-rounder', cl: 'jadeja' }
-};
+  const API_BASE = getApiBase();
 
-const toast = (text, isError = false) => {
-  const el = $('#toast');
-  el.textContent = text;
-  el.style.borderColor = isError ? 'rgba(239, 68, 68, 0.4)' : 'rgba(163, 230, 53, 0.4)';
-  el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 3000);
-};
+  let g_bootId = null;
+  let g_uiRevision = null;
+  let g_currentMatchData = null;
+  let g_cooldownTimerInterval = null;
+  let g_cooldownRemainingMs = 0;
+  let g_lastCooldownFetchTime = Date.now();
+  let g_selectedPollOption = 'opt-1';
+  let g_activeAuthToken = null;
 
-const authHeaders = () => session ? { 'Authorization': `Bearer ${session.token}` } : {};
-
-async function loadData() {
+  // Retrieve stored token safely from localStorage
   try {
-    const [stateRes, analyticsRes, noteRes] = await Promise.all([
-      fetch('/api/state').then(r => r.json()),
-      fetch('/api/analytics').then(r => r.json()),
-      fetch('/api/player-note').then(r => r.json()).catch(() => ({ note: '' }))
-    ]);
-
-    match = stateRes;
-    analytics = analyticsRes;
-    if (noteRes && noteRes.note) {
-      $('#player-note').value = noteRes.note;
-    }
-    renderUI();
-    checkReachability(selectedScanPlayerId, true);
-  } catch (err) {
-    console.warn('API sync attempt failed:', err);
-  }
-}
-
-function renderUI() {
-  if (!match || !analytics) return;
-
-  // Header scores
-  $('#score').innerHTML = `${match.score}<span>/${match.wickets}</span>`;
-
-  // Rolling run rate
-  $('#rolling-rate').innerHTML = `${analytics.rollingRunRate.toFixed(2)}<span> / over</span>`;
-
-  // Best six over stretch
-  $('#stretch').textContent = `BEST 6 OVERS   ${analytics.bestSixOverRuns} RUNS`;
-
-  // Averages comparison
-  const recent = match.overs.slice(-3).reduce((s, o) => s + o.runs, 0) / Math.min(3, match.overs.length);
-  const innings = match.overs.reduce((s, o) => s + o.runs, 0) / match.overs.length;
-  const delta = recent - innings;
-  $('#last-three').textContent = recent.toFixed(2);
-  $('#innings-average').textContent = innings.toFixed(2);
-  $('#rate-delta').textContent = `${delta >= 0 ? '+' : '−'}${Math.abs(delta).toFixed(2)} vs innings avg`;
-
-  // Best window calculation for chart highlighting
-  let bestStart = 0;
-  if (analytics.bestSixOverRuns === 86) {
-    bestStart = 0; // Discrete block overs 1-6
-  } else if (analytics.bestSixOverRuns === 108) {
-    bestStart = 2; // Overlapping window overs 3-8
-  } else {
-    let bestRuns = -1;
-    for (let s = 0; s + 6 <= match.overs.length; s++) {
-      const runs = match.overs.slice(s, s + 6).reduce((sum, o) => sum + o.runs, 0);
-      if (runs > bestRuns) { bestRuns = runs; bestStart = s; }
-    }
+    g_activeAuthToken = localStorage.getItem('cricpulse_player_token');
+  } catch (e) {
+    g_activeAuthToken = null;
   }
 
-  // Momentum chart
-  const maxRuns = Math.max(...match.overs.map(o => o.runs));
-  const barsHtml = match.overs.map((o, idx) => {
-    const isBest = (idx >= bestStart && idx < bestStart + 6);
-    const heightPct = Math.max(8, Math.round((o.runs / maxRuns) * 100));
-    return `
-      <div class="bar-col">
-        <span class="bar-value" style="--height: ${heightPct}%">${o.runs}</span>
-        <i class="bar ${isBest ? 'best' : ''}" style="height: ${heightPct}%" title="Over ${o.number}: ${o.runs} runs"></i>
-        <small class="bar-label">${o.number}</small>
-      </div>
+  // Toast notification helper
+  function showToast(message) {
+    const container = document.getElementById('toastContainer');
+    if (!container) return;
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.innerHTML = `
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#10b981" stroke-width="2">
+        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+        <polyline points="22 4 12 14.01 9 11.01"/>
+      </svg>
+      <span>${message}</span>
     `;
-  }).join('');
-  $('#chart').innerHTML = barsHtml;
-
-  // Mini bars in rate card
-  $('#mini-bars').innerHTML = match.overs.slice(-8).map(o =>
-    `<i style="height: ${Math.max(6, Math.round((o.runs / 24) * 44))}px" title="${o.runs} runs"></i>`
-  ).join('');
-
-  // Ball-by-ball feed
-  $('#feed-list').innerHTML = match.overs.slice(-6, -1).reverse().map(o =>
-    `<div class="feed-row"><span>Over ${o.number}</span><b>${o.runs} runs</b></div>`
-  ).join('');
-
-  // Strongest chain badge
-  const chainNames = (analytics.chain || []).map(id => playerMap[id] ? playerMap[id].short : `P${id}`);
-  $('#chain-path').textContent = chainNames.join(' ➔ ');
-  $('#chain-strength').textContent = `${analytics.chainStrength} runs bottleneck`;
-
-  // Render partnership graph
-  renderGraph();
-
-  // Session & User badge
-  if (session) {
-    $('#user-badge').textContent = `${session.user} (${session.role})`;
-    $('#login-open').textContent = 'Sign out';
-    $('#workspace-role-badge').textContent = session.role.toUpperCase();
-  } else {
-    $('#user-badge').textContent = 'Guest';
-    $('#login-open').textContent = 'Sign in';
-    $('#workspace-role-badge').textContent = 'ROHIT';
-  }
-}
-
-function renderGraph() {
-  const edges = [
-    { a: 0, b: 1, runs: 38 },
-    { a: 0, b: 2, runs: 30 },
-    { a: 0, b: 3, runs: 14 },
-    { a: 1, b: 5, runs: 20 },
-    { a: 2, b: 4, runs: 45 },
-    { a: 3, b: 4, runs: 22 },
-    { a: 4, b: 5, runs: 34 }
-  ];
-
-  // Build active chain edges set
-  const chainEdges = new Set();
-  const chain = analytics.chain || [];
-  for (let i = 0; i < chain.length - 1; i++) {
-    const u = chain[i], v = chain[i + 1];
-    chainEdges.add(`${Math.min(u, v)}-${Math.max(u, v)}`);
-  }
-
-  // Generate SVG lines
-  let svgEdgesHtml = '';
-  for (const e of edges) {
-    const p1 = playerMap[e.a];
-    const p2 = playerMap[e.b];
-    const isChain = chainEdges.has(`${Math.min(e.a, e.b)}-${Math.max(e.a, e.b)}`);
-    const midX = (p1.x + p2.x) / 2;
-    const midY = (p1.y + p2.y) / 2;
-
-    svgEdgesHtml += `
-      <line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y}" class="${isChain ? 'chain-edge' : ''}" />
-      <text x="${midX}" y="${midY - 8}" class="edge-label ${isChain ? 'chain-label' : ''}">${e.runs}</text>
-    `;
-  }
-  $('#svg-edges').innerHTML = svgEdgesHtml;
-
-  // Generate Node elements
-  let nodesHtml = '';
-  for (const id in playerMap) {
-    const p = playerMap[id];
-    const inChain = chain.includes(p.id);
-    const leftPct = (p.x / 1000) * 100;
-    const topPct = (p.y / 450) * 100;
-
-    nodesHtml += `
-      <div class="graph-player ${inChain ? 'active' : ''}" style="left: ${leftPct}%; top: ${topPct}%;" data-player-id="${p.id}" id="player-node-${p.id}">
-        <span class="avatar ${p.cl}">${p.initials}</span>
-        <b>${p.short}</b>
-        <small>${p.id === 0 ? 'at crease' : p.role}</small>
-      </div>
-    `;
-  }
-  $('#graph-nodes').innerHTML = nodesHtml;
-
-  // Attach click handlers to player nodes for reachability check
-  $$('.graph-player').forEach(node => {
-    node.onclick = () => {
-      const pid = parseInt(node.getAttribute('data-player-id'), 10);
-      selectedScanPlayerId = pid;
-      checkReachability(pid, false);
-    };
-  });
-}
-
-async function checkReachability(playerId, silent = false) {
-  try {
-    const p = playerMap[playerId] || { short: `Player ${playerId}`, fullName: `Player ${playerId}` };
-    const res = await fetch(`/api/reachable/${playerId}`);
-    const data = await res.json();
-    const reachable = data.reachable || [];
-    const banner = $('#reachability-banner');
-    const textEl = $('#reachability-text');
-
-    // Expected: All other 5 players are connected in the sample match
-    const totalExpected = 5;
-
-    if (reachable.length < totalExpected) {
-      banner.className = 'reachability-banner warning';
-      if (reachable.length === 1) {
-        textEl.innerHTML = `⚠️ <b>Partnership Scan Warning:</b> Only 1 teammate is connected to ${p.fullName} (Scan terminated prematurely on sibling branch)!`;
-        if (!silent) toast(`Warning: Only 1 teammate is connected to ${p.short}`, true);
-      } else {
-        textEl.innerHTML = `⚠️ <b>Partnership Scan Incomplete:</b> Only ${reachable.length} teammate(s) connected to ${p.fullName} (Expected ${totalExpected} connected players)!`;
-        if (!silent) toast(`Scan incomplete: only ${reachable.length} teammate(s) reachable`, true);
-      }
-    } else {
-      banner.className = 'reachability-banner success';
-      textEl.innerHTML = `✅ <b>Partnership Scan Complete:</b> All ${reachable.length} teammates connected to ${p.fullName} across all network branches!`;
-      if (!silent) toast(`All ${reachable.length} teammates connected to ${p.short}`);
-    }
-
-    // Temporarily highlight reachable player nodes
-    $$('.graph-player').forEach(node => {
-      const id = parseInt(node.getAttribute('data-player-id'), 10);
-      if (reachable.includes(id) || id === playerId) {
-        node.style.opacity = '1';
-        node.style.transform = 'translate(-50%, -50%) scale(1.15)';
-      } else {
-        node.style.opacity = '0.35';
-        node.style.transform = 'translate(-50%, -50%) scale(0.9)';
-      }
-    });
-
+    container.appendChild(toast);
     setTimeout(() => {
-      $$('.graph-player').forEach(node => {
-        node.style.opacity = '1';
-        node.style.transform = 'translate(-50%, -50%) scale(1)';
-      });
-    }, 2500);
-
-  } catch (err) {
-    toast('Failed to scan partnership reachability', true);
+      toast.style.opacity = '0';
+      toast.style.transform = 'translateY(10px)';
+      toast.style.transition = 'all 0.3s ease';
+      setTimeout(() => toast.remove(), 300);
+    }, 4000);
   }
-}
 
-// Button explicitly scanning Rohit
-$('#scan-rohit-btn').onclick = () => checkReachability(0);
-
-// Authentication UI handlers
-$('#login-open').onclick = () => {
-  if (session) {
-    session = null;
-    localStorage.removeItem('cricpulse-session');
-    renderUI();
-    toast('Signed out successfully');
-    return;
-  }
-  $('#login-modal').classList.remove('hidden');
-};
-
-$('#login-close').onclick = () => {
-  $('#login-modal').classList.add('hidden');
-};
-
-$('#account').onchange = () => {
-  const acc = $('#account').value;
-  $('#password').value = (acc === 'rohit') ? 'coverdrive' : 'fanpass';
-};
-
-$('#login-submit').onclick = async () => {
-  const user = $('#account').value;
-  const password = $('#password').value;
-
-  try {
-    const res = await fetch('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user, password })
-    });
-    const data = await res.json();
-    if (!data.ok) {
-      toast(data.error || 'Invalid credentials', true);
-      return;
-    }
-    session = data;
-    localStorage.setItem('cricpulse-session', JSON.stringify(session));
-    $('#login-modal').classList.add('hidden');
-    renderUI();
-    toast(`Welcome, ${session.user} (${session.role})!`);
-  } catch (err) {
-    toast('Connection error during login', true);
-  }
-};
-
-$('#password').onkeydown = (e) => {
-  if (e.key === 'Enter') $('#login-submit').click();
-};
-
-// Fan Poll Voting
-$$('.poll-option').forEach(button => {
-  button.onclick = async () => {
-    if (!session) {
-      $('#login-modal').classList.remove('hidden');
-      toast('Please sign in to vote in fan polls');
-      return;
-    }
-
+  // Health check polling loop (runs every 1.5 seconds)
+  async function pollHealth() {
     try {
-      const choice = button.getAttribute('data-choice');
-      const res = await fetch('/api/poll', {
+      const res = await fetch(`${API_BASE}api/health`, { cache: 'no-store' });
+      if (!res.ok) {
+        throw new Error(`Health status ${res.status}`);
+      }
+      const data = await res.json();
+      const reconnectBanner = document.getElementById('reconnectBanner');
+      if (reconnectBanner) reconnectBanner.classList.add('hidden');
+
+      if (g_bootId === null) {
+        // Initial connection
+        g_bootId = data.boot_id;
+        g_uiRevision = data.ui_revision;
+        const reloadText = document.getElementById('lastReloadText');
+        if (reloadText) reloadText.textContent = `Started ${data.started_at}`;
+      } else if (g_bootId !== data.boot_id) {
+        // Server restarted: reload notification and data refresh
+        g_bootId = data.boot_id;
+        showToast(`Changes applied, reloaded at ${data.started_at}`);
+        const reloadText = document.getElementById('lastReloadText');
+        if (reloadText) reloadText.textContent = `Reloaded ${data.started_at}`;
+        await fetchMatchData();
+      }
+
+      if (g_uiRevision !== null && g_uiRevision !== data.ui_revision) {
+        // Frontend asset changed: hot reload browser window
+        g_uiRevision = data.ui_revision;
+        window.location.reload();
+      }
+    } catch (err) {
+      // Server is restarting or unreachable
+      const reconnectBanner = document.getElementById('reconnectBanner');
+      if (reconnectBanner) reconnectBanner.classList.remove('hidden');
+    }
+  }
+
+  // Fetch full match state and analytics
+  async function fetchMatchData() {
+    try {
+      let url = `${API_BASE}api/match`;
+      const params = [];
+      if (g_activeAuthToken) {
+        params.push(`token=${encodeURIComponent(g_activeAuthToken)}`);
+      }
+      if (params.length > 0) {
+        url += '?' + params.join('&');
+      }
+
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      g_currentMatchData = data;
+      renderMatchCenter(data);
+    } catch (e) {
+      // Connection failure handled gracefully by retry banner
+    }
+  }
+
+  // Render complete dashboard interface
+  function renderMatchCenter(data) {
+    if (!data) return;
+
+    // 1. Live Match Score Header
+    const scoreRuns = document.getElementById('liveScoreRuns');
+    if (scoreRuns) scoreRuns.textContent = `${data.totalRuns}/${data.wickets}`;
+
+    const scoreOvers = document.getElementById('liveScoreOvers');
+    if (scoreOvers) scoreOvers.textContent = `(${data.oversFormatted} Ov)`;
+
+    const ribbonCrr = document.getElementById('ribbonCrr');
+    if (ribbonCrr) ribbonCrr.textContent = Number(data.currentRunRate).toFixed(2);
+
+    const ribbonStretch = document.getElementById('ribbonBestStretch');
+    if (ribbonStretch && data.bestStretch) {
+      ribbonStretch.textContent = `Overs ${data.bestStretch.startOver}–${data.bestStretch.endOver} • ${data.bestStretch.totalRuns} Runs`;
+    }
+
+    // 2. Card 1: Best 6-Over Continuous Stretch
+    const stretchOvers = document.getElementById('bestStretchOvers');
+    if (stretchOvers && data.bestStretch) {
+      stretchOvers.textContent = `Overs ${data.bestStretch.startOver} – ${data.bestStretch.endOver}`;
+    }
+
+    const stretchRuns = document.getElementById('bestStretchRuns');
+    if (stretchRuns && data.bestStretch) {
+      stretchRuns.textContent = data.bestStretch.totalRuns;
+    }
+
+    renderOversChart(data.overRuns, data.bestStretch);
+
+    // 3. Card 2: Current Run Rate & Form
+    const crrDisplay = document.getElementById('crrDisplay');
+    if (crrDisplay) crrDisplay.textContent = Number(data.currentRunRate).toFixed(2);
+
+    const ballsDisplay = document.getElementById('legalBallsDisplay');
+    if (ballsDisplay) ballsDisplay.textContent = data.legalBalls;
+
+    const oversDisplay = document.getElementById('oversBowledDisplay');
+    if (oversDisplay) oversDisplay.textContent = data.oversFormatted;
+
+    renderRateTrendChart(data.overRuns);
+
+    // 4. Card 3: Partnership Network Route
+    renderPlayerSelectors(data.players);
+    renderOptimalRoute(data.optimalRoute, data.players);
+    renderPartnershipGraphSvg(data.players, data.graphLinks, data.optimalRoute);
+
+    // 5. Card 4: Recursive Partnership Chain
+    renderPartnershipChain(data.longestChain, data.players);
+
+    // 6. Card 5: Player Workspace Access & Auth
+    renderAuthCard(data.auth);
+
+    // 7. Card 6: Fan Zone Poll
+    renderPollCard(data.pollOptions, data.pollStatus);
+
+    // 8. Card 7: Ball-by-Ball Feed
+    renderBallFeed(data.ballFeed);
+  }
+
+  // Render Best 6-Overs bar chart
+  function renderOversChart(overRuns, bestStretch) {
+    const container = document.getElementById('oversChartSvgContainer');
+    if (!container || !overRuns || overRuns.length === 0) return;
+
+    const width = container.clientWidth || 480;
+    const height = container.clientHeight || 140;
+    const maxVal = Math.max(...overRuns, 25);
+    const n = overRuns.length;
+    const barWidth = Math.max(14, (width - 40) / n - 8);
+
+    const startIdx = (bestStretch && bestStretch.startOver) ? (bestStretch.startOver - 1) : -1;
+    const endIdx = (bestStretch && bestStretch.endOver) ? (bestStretch.endOver - 1) : -1;
+
+    let barsSvg = '';
+    for (let i = 0; i < n; i++) {
+      const val = overRuns[i];
+      const h = ((val / maxVal) * (height - 45));
+      const x = 20 + i * ((width - 40) / n);
+      const y = height - 25 - h;
+      const isSelected = (i >= startIdx && i <= endIdx);
+
+      const fillColor = isSelected ? '#38bdf8' : 'rgba(255, 255, 255, 0.15)';
+      const strokeColor = isSelected ? '#0284c7' : 'none';
+
+      barsSvg += `
+        <g>
+          <rect x="${x}" y="${y}" width="${barWidth}" height="${h}" rx="3" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1.5" />
+          <text x="${x + barWidth / 2}" y="${y - 4}" text-anchor="middle" fill="${isSelected ? '#38bdf8' : '#64748b'}" font-size="9" font-weight="700">${val}</text>
+          <text x="${x + barWidth / 2}" y="${height - 8}" text-anchor="middle" fill="#64748b" font-size="9" font-weight="600">Ov ${i + 1}</text>
+        </g>
+      `;
+    }
+
+    container.innerHTML = `
+      <svg width="100%" height="100%" viewBox="0 0 ${width} ${height}">
+        <line x1="10" y1="${height - 24}" x2="${width - 10}" y2="${height - 24}" stroke="rgba(255,255,255,0.1)" stroke-width="1" />
+        ${barsSvg}
+      </svg>
+    `;
+  }
+
+  // Render Over-by-Over Trend Line
+  function renderRateTrendChart(overRuns) {
+    const container = document.getElementById('rateTrendSvgContainer');
+    if (!container || !overRuns || overRuns.length === 0) return;
+
+    const width = container.clientWidth || 480;
+    const height = container.clientHeight || 140;
+    const maxVal = Math.max(...overRuns, 25);
+    const n = overRuns.length;
+
+    let points = [];
+    for (let i = 0; i < n; i++) {
+      const val = overRuns[i];
+      const x = 30 + (i / (n - 1)) * (width - 60);
+      const y = height - 30 - ((val / maxVal) * (height - 50));
+      points.push({ x, y, val, over: i + 1 });
+    }
+
+    let pathD = `M ${points[0].x} ${points[0].y}`;
+    for (let i = 1; i < points.length; i++) {
+      pathD += ` L ${points[i].x} ${points[i].y}`;
+    }
+
+    let areaD = `${pathD} L ${points[points.length - 1].x} ${height - 20} L ${points[0].x} ${height - 20} Z`;
+
+    let dotsSvg = '';
+    for (const pt of points) {
+      dotsSvg += `
+        <circle cx="${pt.x}" cy="${pt.y}" r="4" fill="#10b981" stroke="#064e3b" stroke-width="2" />
+        <text x="${pt.x}" y="${pt.y - 8}" text-anchor="middle" fill="#34d399" font-size="9" font-weight="700">${pt.val}</text>
+        <text x="${pt.x}" y="${height - 6}" text-anchor="middle" fill="#64748b" font-size="8">${pt.over}</text>
+      `;
+    }
+
+    container.innerHTML = `
+      <svg width="100%" height="100%" viewBox="0 0 ${width} ${height}">
+        <defs>
+          <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="rgba(16, 185, 129, 0.3)"/>
+            <stop offset="100%" stop-color="rgba(16, 185, 129, 0.0)"/>
+          </linearGradient>
+        </defs>
+        <path d="${areaD}" fill="url(#areaGrad)" />
+        <path d="${pathD}" fill="none" stroke="#10b981" stroke-width="2.5" />
+        ${dotsSvg}
+      </svg>
+    `;
+  }
+
+  // Render Player Dropdown Selectors
+  function renderPlayerSelectors(players) {
+    const startSelect = document.getElementById('routeStartSelect');
+    const endSelect = document.getElementById('routeEndSelect');
+    const chainSelect = document.getElementById('chainStartSelect');
+
+    if (!startSelect || !players) return;
+
+    if (startSelect.options.length === 0) {
+      players.forEach(p => {
+        const opt1 = new Option(`${p.name} (${p.role.split(' ')[0]})`, p.id);
+        const opt2 = new Option(`${p.name} (${p.role.split(' ')[0]})`, p.id);
+        const opt3 = new Option(`${p.name} (${p.role.split(' ')[0]})`, p.id);
+
+        startSelect.add(opt1);
+        endSelect.add(opt2);
+        chainSelect.add(opt3);
+      });
+
+      startSelect.value = '0';
+      endSelect.value = '4';
+      chainSelect.value = '0';
+
+      startSelect.addEventListener('change', onRouteSelectChange);
+      endSelect.addEventListener('change', onRouteSelectChange);
+      chainSelect.addEventListener('change', onChainSelectChange);
+    }
+  }
+
+  async function onRouteSelectChange() {
+    const start = document.getElementById('routeStartSelect').value;
+    const end = document.getElementById('routeEndSelect').value;
+    try {
+      const res = await fetch(`${API_BASE}api/partnership/route?start=${start}&end=${end}`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        renderOptimalRoute(data, g_currentMatchData ? g_currentMatchData.players : []);
+        renderPartnershipGraphSvg(
+          g_currentMatchData ? g_currentMatchData.players : [],
+          g_currentMatchData ? g_currentMatchData.graphLinks : [],
+          data
+        );
+      }
+    } catch (e) {}
+  }
+
+  async function onChainSelectChange() {
+    const start = document.getElementById('chainStartSelect').value;
+    try {
+      const res = await fetch(`${API_BASE}api/partnership/chain?start=${start}`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        renderPartnershipChain(data, g_currentMatchData ? g_currentMatchData.players : []);
+      }
+    } catch (e) {}
+  }
+
+  // Render Optimal Partnership Route Chips
+  function renderOptimalRoute(route, players) {
+    const container = document.getElementById('routeChipsContainer');
+    const costDisplay = document.getElementById('routeTotalCost');
+    if (!container || !route) return;
+
+    if (costDisplay) costDisplay.textContent = route.totalCost;
+
+    const playerMap = {};
+    if (players) {
+      players.forEach(p => { playerMap[p.id] = p.name; });
+    }
+
+    const path = route.playerPath || [];
+    container.innerHTML = path.map((id, index) => {
+      const name = playerMap[id] || `Player ${id}`;
+      const isLast = (index === path.length - 1);
+      return `
+        <span class="player-chip">${name}</span>
+        ${!isLast ? '<span class="chip-arrow">➔</span>' : ''}
+      `;
+    }).join('');
+  }
+
+  // Render SVG Interactive Partnership Graph
+  function renderPartnershipGraphSvg(players, links, route) {
+    const container = document.getElementById('partnershipNetworkSvg');
+    if (!container || !players) return;
+
+    const width = container.clientWidth || 500;
+    const height = container.clientHeight || 200;
+
+    // Preset node coordinates for visual layout
+    const coords = [
+      { x: 50,  y: 100 }, // 0: Rohit
+      { x: 180, y: 40  }, // 1: Kohli
+      { x: 150, y: 160 }, // 2: Rahul
+      { x: 280, y: 160 }, // 3: Gill
+      { x: 330, y: 60  }, // 4: Jadeja
+      { x: 420, y: 130 }, // 5: Pandya
+      { x: 480, y: 70  }  // 6: Bumrah
+    ];
+
+    const activePath = (route && route.playerPath) ? route.playerPath : [];
+    const activeEdges = new Set();
+    for (let i = 0; i + 1 < activePath.length; i++) {
+      activeEdges.add(`${activePath[i]}-${activePath[i+1]}`);
+      activeEdges.add(`${activePath[i+1]}-${activePath[i]}`);
+    }
+
+    let linksSvg = '';
+    if (links) {
+      for (const link of links) {
+        const p1 = coords[link.source];
+        const p2 = coords[link.target];
+        if (!p1 || !p2) continue;
+
+        const isHighlighted = activeEdges.has(`${link.source}-${link.target}`);
+        const strokeColor = isHighlighted ? '#38bdf8' : 'rgba(255,255,255,0.12)';
+        const strokeWidth = isHighlighted ? 3 : 1.5;
+
+        const midX = (p1.x + p2.x) / 2;
+        const midY = (p1.y + p2.y) / 2;
+
+        linksSvg += `
+          <line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />
+          <circle cx="${midX}" cy="${midY}" r="9" fill="#0f172a" stroke="${strokeColor}" stroke-width="1" />
+          <text x="${midX}" y="${midY + 3}" text-anchor="middle" fill="${isHighlighted ? '#38bdf8' : '#94a3b8'}" font-size="8" font-weight="700">${link.weight}</text>
+        `;
+      }
+    }
+
+    let nodesSvg = '';
+    for (let i = 0; i < players.length; i++) {
+      const p = players[i];
+      const pos = coords[i] || { x: 50 + i * 60, y: 100 };
+      const inPath = activePath.includes(p.id);
+
+      const fillColor = inPath ? '#0284c7' : '#1e293b';
+      const strokeColor = inPath ? '#38bdf8' : 'rgba(255,255,255,0.2)';
+      const initials = p.name.split(' ').map(s => s[0]).join('');
+
+      nodesSvg += `
+        <g style="cursor: pointer" onclick="window.selectGraphPlayer(${p.id})">
+          <circle cx="${pos.x}" cy="${pos.y}" r="15" fill="${fillColor}" stroke="${strokeColor}" stroke-width="2" />
+          <text x="${pos.x}" y="${pos.y + 4}" text-anchor="middle" fill="#fff" font-size="9" font-weight="800">${initials}</text>
+          <text x="${pos.x}" y="${pos.y + 24}" text-anchor="middle" fill="${inPath ? '#38bdf8' : '#94a3b8'}" font-size="8" font-weight="600">${p.name.split(' ')[0]}</text>
+        </g>
+      `;
+    }
+
+    container.innerHTML = `
+      <svg width="100%" height="100%" viewBox="0 0 540 200">
+        ${linksSvg}
+        ${nodesSvg}
+      </svg>
+    `;
+  }
+
+  window.selectGraphPlayer = function(id) {
+    const endSelect = document.getElementById('routeEndSelect');
+    if (endSelect) {
+      endSelect.value = String(id);
+      onRouteSelectChange();
+    }
+  };
+
+  // Render Recursive Partnership Chain
+  function renderPartnershipChain(chainData, players) {
+    const seqContainer = document.getElementById('chainSequenceContainer');
+    const lengthDisplay = document.getElementById('chainLengthDisplay');
+    const vizContainer = document.getElementById('chainVisualizer');
+
+    if (!seqContainer || !chainData) return;
+
+    const path = chainData.playerPath || [];
+    if (lengthDisplay) lengthDisplay.textContent = chainData.length || path.length;
+
+    const playerMap = {};
+    if (players) {
+      players.forEach(p => { playerMap[p.id] = p.name; });
+    }
+
+    seqContainer.innerHTML = path.map((id, index) => {
+      const name = playerMap[id] || `Player ${id}`;
+      const isLast = (index === path.length - 1);
+      return `
+        <span class="chain-node-badge">${name}</span>
+        ${!isLast ? '<span class="chain-arrow">➔</span>' : ''}
+      `;
+    }).join('');
+
+    if (vizContainer) {
+      vizContainer.innerHTML = path.map((id, index) => {
+        const name = playerMap[id] || `Player ${id}`;
+        return `
+          <div class="chain-step-card">
+            <span class="chain-step-num">STEP ${index + 1}</span>
+            <span class="chain-step-name">${name}</span>
+          </div>
+        `;
+      }).join('');
+    }
+  }
+
+  // Render Player Workspace Access & Auth State
+  function renderAuthCard(auth) {
+    if (!auth) return;
+
+    const nameEl = document.getElementById('authPlayerName');
+    const roleEl = document.getElementById('authPlayerRole');
+    const idEl = document.getElementById('authPlayerId');
+    const badgeEl = document.getElementById('sessionStatusBadge');
+    const ribbonBadge = document.getElementById('ribbonAuthBadge');
+    const expiryEl = document.getElementById('authExpiryText');
+    const avatarEl = document.getElementById('authAvatar');
+
+    if (nameEl) nameEl.textContent = auth.playerName || 'Virat Kohli';
+    if (roleEl) roleEl.textContent = `${auth.role || 'captain'} • Verified Workspace`;
+    if (idEl) idEl.textContent = auth.playerId || 'player-18';
+    if (avatarEl && auth.playerName) {
+      avatarEl.textContent = auth.playerName.split(' ').map(s => s[0]).join('');
+    }
+
+    const isExpired = auth.isExpired;
+    const isValid = auth.isValid;
+
+    if (badgeEl) {
+      if (!isExpired && isValid) {
+        badgeEl.className = 'session-badge status-active';
+        badgeEl.textContent = 'Active Session';
+      } else {
+        badgeEl.className = 'session-badge status-expired';
+        badgeEl.textContent = 'Session Expired';
+      }
+    }
+
+    if (ribbonBadge) {
+      if (!isExpired && isValid) {
+        ribbonBadge.className = 'stat-badge';
+        ribbonBadge.textContent = 'Active';
+      } else {
+        ribbonBadge.className = 'stat-badge expired';
+        ribbonBadge.textContent = 'Expired';
+      }
+    }
+
+    if (expiryEl) {
+      if (!isExpired && isValid) {
+        expiryEl.textContent = 'Active (Valid)';
+      } else {
+        expiryEl.textContent = 'Expired (Timeout)';
+      }
+    }
+  }
+
+  // Render Fan Zone Poll Options and Cooldown Countdown
+  function renderPollCard(options, status) {
+    const container = document.getElementById('pollOptionsContainer');
+    if (!container || !options) return;
+
+    container.innerHTML = options.map(opt => {
+      const isChecked = (opt.id === g_selectedPollOption);
+      return `
+        <div class="poll-option-item ${isChecked ? 'selected' : ''}" onclick="window.selectPollOption('${opt.id}')">
+          <div class="option-left">
+            <input type="radio" name="pollOpt" value="${opt.id}" class="option-radio" ${isChecked ? 'checked' : ''}>
+            <span class="option-name">${opt.name}</span>
+          </div>
+          <span class="option-votes">${opt.votes} votes</span>
+        </div>
+      `;
+    }).join('');
+
+    if (status) {
+      startCooldownCountdown(status.remainingCooldownMs);
+    }
+  }
+
+  window.selectPollOption = function(optId) {
+    g_selectedPollOption = optId;
+    if (g_currentMatchData) {
+      renderPollCard(g_currentMatchData.pollOptions, null);
+    }
+  };
+
+  // Cooldown timer handler
+  function startCooldownCountdown(remainingMs) {
+    clearInterval(g_cooldownTimerInterval);
+    g_cooldownRemainingMs = Math.max(0, remainingMs);
+    g_lastCooldownFetchTime = Date.now();
+
+    updateCooldownDisplay();
+
+    g_cooldownTimerInterval = setInterval(() => {
+      const elapsed = Date.now() - g_lastCooldownFetchTime;
+      g_lastCooldownFetchTime = Date.now();
+      g_cooldownRemainingMs = Math.max(0, g_cooldownRemainingMs - elapsed);
+      updateCooldownDisplay();
+      if (g_cooldownRemainingMs <= 0) {
+        clearInterval(g_cooldownTimerInterval);
+      }
+    }, 250);
+  }
+
+  function updateCooldownDisplay() {
+    const textEl = document.getElementById('cooldownTimerText');
+    const pillEl = document.getElementById('cooldownPill');
+    const btnVote = document.getElementById('btnSubmitVote');
+
+    if (!textEl || !pillEl) return;
+
+    if (g_cooldownRemainingMs <= 0) {
+      pillEl.className = 'cooldown-pill ready';
+      textEl.textContent = 'Ready to Vote';
+      if (btnVote) btnVote.disabled = false;
+    } else {
+      pillEl.className = 'cooldown-pill';
+      const secondsLeft = Math.ceil(g_cooldownRemainingMs / 1000);
+      textEl.textContent = `Cooldown: ${secondsLeft}s remaining`;
+    }
+  }
+
+  // Cast Fan Vote Handler
+  async function submitFanVote() {
+    const msgEl = document.getElementById('pollMessage');
+    try {
+      const res = await fetch(`${API_BASE}api/poll/vote`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders()
-        },
-        body: JSON.stringify({ choice })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fanId: 'fan-seeded-user',
+          optionId: g_selectedPollOption
+        })
       });
 
       const data = await res.json();
-      if (res.status === 200 && data.ok) {
-        currentVoteCount++;
-        $('#poll-rate-info').textContent = `Votes cast in window: ${currentVoteCount}/3`;
-        toast(`Vote for ${choice} counted!`);
-      } else if (res.status === 429) {
-        toast(`Rate limit: ${data.error || 'Too many requests'} (HTTP 429)`, true);
+      if (res.ok && data.success) {
+        if (msgEl) {
+          msgEl.className = 'poll-message-area success';
+          msgEl.textContent = 'Vote recorded! Thank you for participating.';
+        }
+        startCooldownCountdown(10000); // 10 second cooldown
+        await fetchMatchData();
       } else {
-        toast(data.error || 'Failed to submit vote', true);
+        if (msgEl) {
+          msgEl.className = 'poll-message-area error';
+          msgEl.textContent = data.error || 'Vote rejected due to cooldown limit.';
+        }
+        if (data.remainingCooldownMs) {
+          startCooldownCountdown(data.remainingCooldownMs);
+        }
       }
-    } catch (err) {
-      toast('Error submitting vote', true);
+    } catch (e) {
+      if (msgEl) {
+        msgEl.className = 'poll-message-area error';
+        msgEl.textContent = 'Vote submission failed. Retrying...';
+      }
     }
-  };
-});
-
-// Player Workspace Note
-$('#save-note').onclick = async () => {
-  if (!session) {
-    $('#login-modal').classList.remove('hidden');
-    toast('Please sign in to edit notes');
-    return;
   }
 
-  const noteText = $('#player-note').value;
-  try {
-    const res = await fetch('/api/player-note', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authHeaders()
-      },
-      body: JSON.stringify({ note: noteText })
+  // Renew Session Handler
+  async function renewSession(playerId = 'player-18', playerName = 'Virat Kohli', role = 'captain') {
+    try {
+      const res = await fetch(`${API_BASE}api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playerId, playerName, role })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        g_activeAuthToken = data.token;
+        try {
+          localStorage.setItem('cricpulse_player_token', data.token);
+        } catch (e) {}
+        showToast(`Authenticated as ${data.playerName}`);
+        await fetchMatchData();
+      }
+    } catch (e) {}
+  }
+
+  // Render Ball-by-Ball Feed
+  function renderBallFeed(balls) {
+    const list = document.getElementById('ballFeedList');
+    if (!list || !balls) return;
+
+    list.innerHTML = balls.map(b => {
+      let badgeClass = 'single';
+      let badgeText = String(b.runs);
+
+      if (b.isWicket) {
+        badgeClass = 'wicket';
+        badgeText = 'W';
+      } else if (b.runs === 0) {
+        badgeClass = 'dot';
+        badgeText = '•';
+      } else if (b.runs === 4) {
+        badgeClass = 'boundary';
+        badgeText = '4';
+      } else if (b.runs === 6) {
+        badgeClass = 'six';
+        badgeText = '6';
+      }
+
+      return `
+        <div class="ball-feed-item">
+          <span class="ball-indicator">${b.over}.${b.ball}</span>
+          <div class="ball-badge ${badgeClass}">${badgeText}</div>
+          <div class="ball-content">
+            <span class="ball-players">${b.bowler} to ${b.batter}</span>
+            <span class="ball-commentary">${b.commentary}</span>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  // Interactive Rate Calculator Listener
+  function setupRateCalculator() {
+    const runsInput = document.getElementById('calcRuns');
+    const ballsInput = document.getElementById('calcBalls');
+    const resultEl = document.getElementById('calcRateResult');
+
+    async function recalculate() {
+      const runs = runsInput ? runsInput.value : 155;
+      const balls = ballsInput ? ballsInput.value : 75;
+      try {
+        const res = await fetch(`${API_BASE}api/analytics/run-rate?runs=${runs}&balls=${balls}`, { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          if (resultEl) resultEl.textContent = Number(data.runRate).toFixed(2);
+        }
+      } catch (e) {}
+    }
+
+    if (runsInput) runsInput.addEventListener('input', recalculate);
+    if (ballsInput) ballsInput.addEventListener('input', recalculate);
+  }
+
+  // Navigation Tabs Listener
+  function setupNavTabs() {
+    const tabs = document.querySelectorAll('.nav-tab');
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        tabs.forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        const target = tab.dataset.tab;
+        const cards = document.querySelectorAll('.analytics-card, .feed-card');
+        cards.forEach(card => {
+          if (target === 'all') {
+            card.style.display = '';
+          } else if (target === 'momentum') {
+            card.style.display = (card.id === 'cardBestStretch' || card.id === 'cardRunRate' || card.id === 'cardFeed') ? '' : 'none';
+          } else if (target === 'network') {
+            card.style.display = (card.id === 'cardNetworkRoute' || card.id === 'cardChain') ? '' : 'none';
+          } else if (target === 'fanzone') {
+            card.style.display = (card.id === 'cardAuth' || card.id === 'cardPoll') ? '' : 'none';
+          }
+        });
+      });
     });
-
-    const data = await res.json();
-    if (res.status === 200 && data.ok) {
-      toast(`Player note saved successfully!`);
-    } else if (res.status === 403) {
-      toast(`Error 403: ${data.error || 'Player access required'}`, true);
-    } else {
-      toast(data.error || 'Failed to update note', true);
-    }
-  } catch (err) {
-    toast('Network error updating player note', true);
   }
-};
 
-// Initial boot
-loadData();
-setInterval(loadData, 5000);
+  // Attach DOM Listeners on page load
+  window.addEventListener('DOMContentLoaded', () => {
+    setupNavTabs();
+    setupRateCalculator();
+
+    const btnVote = document.getElementById('btnSubmitVote');
+    if (btnVote) btnVote.addEventListener('click', submitFanVote);
+
+    const btnRefresh = document.getElementById('btnRefreshSession');
+    if (btnRefresh) {
+      btnRefresh.addEventListener('click', () => {
+        renewSession('player-18', 'Virat Kohli', 'captain');
+      });
+    }
+
+    const btnSwitch = document.getElementById('btnSwitchPlayer');
+    if (btnSwitch) {
+      btnSwitch.addEventListener('click', () => {
+        renewSession('player-45', 'Rohit Sharma', 'captain');
+      });
+    }
+
+    const btnTrace = document.getElementById('btnExploreChain');
+    if (btnTrace) {
+      btnTrace.addEventListener('click', onChainSelectChange);
+    }
+
+    // Initial load
+    fetchMatchData();
+    pollHealth();
+
+    // Health check polling timer
+    setInterval(pollHealth, 1500);
+  });
+
+})();
