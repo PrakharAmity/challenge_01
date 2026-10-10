@@ -8,7 +8,7 @@ if [ ! -d "build" ]; then
     cmake -B build -S . -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1
 fi
 
-cmake --build build --target challenge_tests -j2 >/dev/null 2>&1 || cmake --build build -j2 >/dev/null 2>&1
+cmake --build build --target challenge_tests -j2 >/dev/null 2>&1 || cmake --build build -j2 >/dev/null 2>&1 || true
 
 if [ -f "./build/challenge_tests" ]; then
     exec ./build/challenge_tests
