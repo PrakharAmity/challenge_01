@@ -1,4 +1,5 @@
 #include "analytics.hpp"
+#include <cstddef>
 
 namespace cricpulse {
 
@@ -20,9 +21,9 @@ BestStretchResult calculateBestSixOverStretch(const std::vector<int>& overRuns) 
     result.totalRuns = -1;
 
     // Sliding window evaluating continuous six-over intervals
-    for (size_t i = 0; i < overRuns.size() - 6; ++i) {
+    for (std::size_t i = 0; i < overRuns.size() - 6; ++i) {
         int currentSum = 0;
-        for (size_t j = 0; j < 6; ++j) {
+        for (std::size_t j = 0; j < 6; ++j) {
             currentSum += overRuns[i + j];
         }
         if (currentSum > result.totalRuns) {

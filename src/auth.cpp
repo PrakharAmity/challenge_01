@@ -1,6 +1,7 @@
 #include "auth.hpp"
 
 #include <array>
+#include <cstddef>
 #include <iomanip>
 #include <sstream>
 #include <vector>
@@ -65,7 +66,7 @@ std::vector<uint8_t> sha256Bytes(const std::vector<uint8_t>& data) {
         msg.push_back(static_cast<uint8_t>((bitLen >> (i * 8)) & 0xff));
     }
 
-    for (size_t chunk = 0; chunk < msg.size(); chunk += 64) {
+    for (std::size_t chunk = 0; chunk < msg.size(); chunk += 64) {
         uint32_t W[64];
         for (int i = 0; i < 16; ++i) {
             W[i] = (static_cast<uint32_t>(msg[chunk + i * 4]) << 24) |
@@ -143,7 +144,7 @@ std::string computeHmacHex(const std::string& secret, const std::string& data) {
 
     std::vector<uint8_t> k_ipad(64);
     std::vector<uint8_t> k_opad(64);
-    for (size_t i = 0; i < 64; ++i) {
+    for (std::size_t i = 0; i < 64; ++i) {
         k_ipad[i] = key[i] ^ 0x36;
         k_opad[i] = key[i] ^ 0x5c;
     }

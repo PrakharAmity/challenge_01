@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -34,7 +35,7 @@ bool verifyConsecutivePath(
     if (path.size() <= 1) {
         return true;
     }
-    for (size_t i = 0; i + 1 < path.size(); ++i) {
+    for (std::size_t i = 0; i + 1 < path.size(); ++i) {
         int u = path[i];
         int v = path[i + 1];
         if (u < 0 || u >= static_cast<int>(graph.size())) return false;

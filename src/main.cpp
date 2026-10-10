@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <csignal>
+#include <cstddef>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
@@ -231,7 +232,7 @@ int main(int argc, char* argv[]) {
 
         // Partnership graph
         json linksArr = json::array();
-        for (size_t u = 0; u < match.partnershipGraph.size(); ++u) {
+        for (std::size_t u = 0; u < match.partnershipGraph.size(); ++u) {
             for (const auto& edge : match.partnershipGraph[u]) {
                 if (static_cast<int>(u) < edge.target) {
                     linksArr.push_back({
